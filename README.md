@@ -1,10 +1,10 @@
 # Codex Switch
 
-> One tiny macOS app for switching Codex between Official OpenAI login and a custom OpenAI-compatible API endpoint.
+> One tiny macOS app for switching Codex between Official OpenAI login and a custom OpenAI-compatible API endpoint, while keeping your current conversation context.
 
-Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and preserves your official ChatGPT login while routing custom model calls through a relay API key.
+Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It can switch providers and keep the same Codex thread context, so you can continue the current conversation after moving between Official OpenAI and a custom API. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and preserves your official ChatGPT login while routing custom model calls through a relay API key.
 
-中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
+中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。切换后会尽量保留当前对话上下文，让你继续原来的 Codex 会话。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
 
 ## Download App
 
@@ -32,6 +32,7 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 ## Features
 
 - One-click macOS app: switch, status, settings.
+- Continue the same conversation after switching between Official OpenAI and a custom API.
 - CLI for scripting and quick terminal use.
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
@@ -89,7 +90,7 @@ The app has three actions:
 - **Status**: show current Codex auth/provider/model.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
-When switching from the macOS app, existing Codex thread metadata is provider-synced in place, then Codex.app is gracefully quit and reopened so the running session reloads the selected provider. The thread id and conversation history stay in place.
+When switching from the macOS app, existing Codex thread metadata is provider-synced in place, then Codex.app is gracefully quit and reopened so the running session reloads the selected provider. The thread id and conversation history stay in place, so you can continue the original conversation after the switch.
 
 ### CLI
 
