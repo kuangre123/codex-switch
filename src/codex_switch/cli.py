@@ -448,6 +448,8 @@ def switch_local(args: argparse.Namespace) -> int:
     if not api_key:
         raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
     state["local_api_key"] = api_key
+    state["local_base_url"] = base_url
+    state["local_model"] = model
 
     session_snapshot = snapshot_session_state(home, backup_dir)
     backup_file(auth_path, backup_dir)
@@ -477,6 +479,7 @@ def switch_official(args: argparse.Namespace) -> int:
     state = load_state(home)
     remember_current_auth(home, auth, state)
     model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    state["official_model"] = model
     official_auth = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None}
 
     session_snapshot = snapshot_session_state(home, backup_dir)
@@ -520,6 +523,72 @@ def status(_: argparse.Namespace) -> int:
     return 0
 
 
+def config_value(config: str, key: str) -> str:
+    match = re.search(rf"^{re.escape(key)}\s*=\s*\"([^\"]*)\"", config, re.MULTILINE)
+    return match.group(1) if match else "(missing)"
+
+
+def custom_base_url(config: str) -> str:
+    match = re.search(
+        r"^\[model_providers\.custom\][\s\S]*?^base_url\s*=\s*\"([^\"]*)\"",
+        config,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else DEFAULT_BASE_URL
+
+
+def current_local_api_key(auth: dict[str, object], state: dict[str, object]) -> str | None:
+    for value in (auth.get("OPENAI_API_KEY"), state.get("local_api_key")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def mode_label(auth_mode: object, provider: str) -> str:
+    if auth_mode == "apikey" or provider == "custom":
+        return "自定义 API"
+    if auth_mode == "chatgpt" or provider == "openai":
+        return "官方 OpenAI"
+    return "未配置"
+
+
+def auth_label(value: str) -> str:
+    if value == "apikey":
+        return "API Key"
+    if value == "chatgpt":
+        return "ChatGPT 登录"
+    return value
+
+
+def status_zh(_: argparse.Namespace) -> int:
+    home = codex_home()
+    auth_path = home / "auth.json"
+    config_path = home / "config.toml"
+    auth = load_auth(auth_path)
+    state = load_state(home)
+    config = read_config(config_path)
+    auth_mode = auth.get("auth_mode") or "(missing)"
+    provider = config_value(config, "model_provider")
+    api_key = current_local_api_key(auth, state)
+
+    print(f"Codex 目录: {home}")
+    print(f"当前模式: {mode_label(auth_mode, provider)}")
+    print(f"当前认证: {auth_label(str(auth_mode))}")
+    print(f"已保存的自定义 API Key: {'已配置 ' + redacted_key(api_key) if api_key else '未配置'}")
+    print(f"模型来源: {provider}")
+    print(f"模型: {config_value(config, 'model')}")
+    print(f"自定义 API 地址: {custom_base_url(config)}")
+    return 0
+
+
+def needs_setup(_: argparse.Namespace) -> int:
+    home = codex_home()
+    auth = load_auth(home / "auth.json")
+    state = load_state(home)
+    print("no" if current_local_api_key(auth, state) else "yes")
+    return 0
+
+
 def config_show(_: argparse.Namespace) -> int:
     home = codex_home()
     state = load_state(home)
@@ -527,6 +596,16 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"local_base_url: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
+    return 0
+
+
+def config_show_zh(_: argparse.Namespace) -> int:
+    home = codex_home()
+    state = load_state(home)
+    print(f"Codex 目录: {home}")
+    print(f"自定义 API 地址: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
+    print(f"自定义模型: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
+    print(f"官方模型: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     return 0
 
 
@@ -621,10 +700,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show current Codex switch-relevant state.")
     status_parser.set_defaults(func=status)
 
+    status_zh_parser = subparsers.add_parser("status-zh", help="Show current Codex state in Chinese for the app UI.")
+    status_zh_parser.set_defaults(func=status_zh)
+
+    needs_setup_parser = subparsers.add_parser("needs-setup", help="Print yes when local API key setup is missing.")
+    needs_setup_parser.set_defaults(func=needs_setup)
+
     config_parser = subparsers.add_parser("config", help="Show or update Codex Switch defaults.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
     config_show_parser = config_subparsers.add_parser("show", help="Show saved switch defaults.")
     config_show_parser.set_defaults(func=config_show)
+    config_show_zh_parser = config_subparsers.add_parser("show-zh", help="Show saved switch defaults in Chinese.")
+    config_show_zh_parser.set_defaults(func=config_show_zh)
     config_set_parser = config_subparsers.add_parser("set", help="Update saved switch defaults.")
     config_set_parser.add_argument("--local-base-url", help="Default local relay API base URL.")
     config_set_parser.add_argument("--local-model", help="Default local model.")

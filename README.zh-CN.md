@@ -46,6 +46,14 @@ cd codex-switch
 open "$HOME/Applications/Codex Switch.app"
 ```
 
+首次打开时，如果还没有配置自定义 API Key，App 会自动引导你填写：
+
+- 自定义 API 地址，默认 `https://jp.icodeeasy.cc`
+- 模型名称，默认 `gpt-5.5`
+- API Key
+
+填写后会保存配置，并直接切换到自定义 API 模式。
+
 命令行：
 
 ```bash
@@ -70,7 +78,7 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 
 或者在 App 里点 **Settings** 修改。
 
-App 里也有 **Sessions** 入口，可以备份会话列表状态、重建会话索引、查看最近会话。
+App 主界面是中文的，包含 **切换模式**、**查看状态**、**会话工具**、**设置**。其中 **会话工具** 可以备份会话列表状态、重建会话索引、查看最近会话。
 
 ## 安全说明
 

@@ -31,7 +31,7 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 
 ## Features
 
-- One-click macOS app: switch, status, settings, session recovery.
+- Chinese one-click macOS app: first-run setup, switch, status, settings, session recovery.
 - CLI for scripting and quick terminal use.
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
@@ -82,12 +82,20 @@ Open:
 open "$HOME/Applications/Codex Switch.app"
 ```
 
+The app is Chinese-first. On first launch, if no local API key is configured, it asks for:
+
+- Custom API base URL. Default: `https://jp.icodeeasy.cc`.
+- Model name. Default: `gpt-5.5`.
+- API key.
+
+Then it saves the settings and switches Codex to custom API mode.
+
 The app has four actions:
 
-- **Switch**: choose `Local custom` or `Official OpenAI`.
-- **Status**: show current Codex auth/provider/model.
-- **Sessions**: snapshot session list state, rebuild the session index, or list recent indexed sessions.
-- **Settings**: edit custom API base URL, custom model, and official model.
+- **切换模式**: choose custom API or official OpenAI.
+- **查看状态**: show current Codex auth/provider/model.
+- **会话工具**: snapshot session list state, rebuild the session index, or list recent indexed sessions.
+- **设置**: edit custom API base URL, custom model, and official model.
 
 切换后建议重启 Codex App，让界面刷新到新的 provider/model。
 

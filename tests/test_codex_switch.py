@@ -217,6 +217,31 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "https://jp.icodeeasy.cc"', config)
 
+    def test_local_switch_saves_passed_base_url_and_model_as_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "local",
+                "--api-key",
+                "sk-test-secret",
+                "--base-url",
+                "https://relay.example.com",
+                "--model",
+                "codex-relay",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = read_state(home)
+            self.assertEqual(state["local_base_url"], "https://relay.example.com")
+            self.assertEqual(state["local_model"], "codex-relay")
+
     def test_official_switch_does_not_restore_cached_oauth_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -263,6 +288,46 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("auth_mode: apikey", result.stdout)
             self.assertIn("api_key: sk-...cret", result.stdout)
             self.assertNotIn("sk-test-secret", result.stdout)
+
+    def test_status_zh_and_needs_setup_support_app_onboarding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+
+            needs_setup = run_tool(home, "needs-setup")
+            status_zh = run_tool(home, "status-zh")
+
+            self.assertEqual(needs_setup.returncode, 0, needs_setup.stderr)
+            self.assertEqual(needs_setup.stdout.strip(), "yes")
+            self.assertEqual(status_zh.returncode, 0, status_zh.stderr)
+            self.assertIn("当前模式: 官方 OpenAI", status_zh.stdout)
+            self.assertIn("当前认证: ChatGPT 登录", status_zh.stdout)
+            self.assertIn("已保存的自定义 API Key: 未配置", status_zh.stdout)
+            self.assertIn("自定义 API 地址: http://127.0.0.1:9999/v1", status_zh.stdout)
+
+    def test_needs_setup_uses_cached_local_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({"local_api_key": "sk-cached-secret"}),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+
+            needs_setup = run_tool(home, "needs-setup")
+            status_zh = run_tool(home, "status-zh")
+
+            self.assertEqual(needs_setup.returncode, 0, needs_setup.stderr)
+            self.assertEqual(needs_setup.stdout.strip(), "no")
+            self.assertIn("已保存的自定义 API Key: 已配置 sk-...cret", status_zh.stdout)
 
     def test_local_switch_requires_key_when_none_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
