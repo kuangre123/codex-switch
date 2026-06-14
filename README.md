@@ -48,6 +48,12 @@ cd codex-switch
 ./scripts/install.sh
 ```
 
+The installer opens the app automatically when it finishes. For script-only installs:
+
+```bash
+./scripts/install.sh --no-open
+```
+
 The installer creates:
 
 ```text
@@ -70,7 +76,11 @@ cd codex-switch
 ./scripts/install.sh
 ```
 
-安装后可以直接打开 `~/Applications/Codex Switch.app`。
+安装完成后会自动打开 `~/Applications/Codex Switch.app`。如果不想自动打开，可以运行：
+
+```bash
+./scripts/install.sh --no-open
+```
 
 ## Usage
 

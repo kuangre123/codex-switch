@@ -6,15 +6,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Dict, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src" / "codex_switch" / "cli.py"
 
 
-def run_tool(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_tool(home: Path, *args: str, extra_env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CODEX_HOME"] = str(home)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         env=env,
@@ -53,6 +56,17 @@ def write_local_config(home: Path) -> None:
     text = text.replace('model = "gpt-5"', 'model = "gpt-5.5"', 1)
     text = text.replace('preferred_auth_method = "chatgpt"', 'preferred_auth_method = "apikey"', 1)
     (home / "config.toml").write_text(text, encoding="utf-8")
+
+
+def write_config_without_custom_provider(home: Path) -> None:
+    home.mkdir(parents=True)
+    (home / "config.toml").write_text(
+        """model_provider = "openai"
+model = "gpt-5"
+preferred_auth_method = "chatgpt"
+""",
+        encoding="utf-8",
+    )
 
 
 def read_state(home: Path) -> dict:
@@ -201,7 +215,7 @@ class CodexSwitchTests(unittest.TestCase):
     def test_local_switch_uses_public_default_api_address(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
-            write_sample_config(home)
+            write_config_without_custom_provider(home)
             (home / "codex-switch-state.json").write_text(
                 json.dumps({"local_api_key": "sk-cached-secret"}),
                 encoding="utf-8",
@@ -216,6 +230,42 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "https://jp.icodeeasy.cc"', config)
+
+    def test_local_switch_prefers_existing_codex_custom_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({"local_api_key": "sk-cached-secret"}),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local")
+            show = run_tool(home, "config", "show")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('base_url = "http://127.0.0.1:9999/v1"', config)
+            self.assertIn("local_base_url: http://127.0.0.1:9999/v1", show.stdout)
+
+    def test_config_show_uses_env_base_url_when_no_saved_or_configured_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir(parents=True)
+
+            show = run_tool(
+                home,
+                "config",
+                "show",
+                extra_env={"OPENAI_BASE_URL": "https://env-relay.example.com"},
+            )
+
+            self.assertEqual(show.returncode, 0, show.stderr)
+            self.assertIn("local_base_url: https://env-relay.example.com", show.stdout)
 
     def test_local_switch_saves_passed_base_url_and_model_as_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -375,7 +425,7 @@ class CodexSwitchTests(unittest.TestCase):
     def test_config_show_uses_public_default_api_address(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
-            write_sample_config(home)
+            write_config_without_custom_provider(home)
 
             show = run_tool(home, "config", "show")
 

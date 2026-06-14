@@ -22,6 +22,7 @@ DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 SESSION_SNAPSHOT_FILES = ("session_index.jsonl", ".codex-global-state.json")
 SESSION_DIRS = ("sessions", "archived_sessions")
+BASE_URL_ENV_KEYS = ("CODEX_SWITCH_LOCAL_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE")
 
 
 class SwitchError(RuntimeError):
@@ -76,6 +77,25 @@ def save_state(home: Path, state: dict[str, object]) -> None:
 def effective_setting(state: dict[str, object], key: str, fallback: str) -> str:
     value = state.get(key)
     return value.strip() if isinstance(value, str) and value.strip() else fallback
+
+
+def first_env_setting(keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def effective_local_base_url(state: dict[str, object], config: str = "") -> str:
+    value = state.get("local_base_url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    configured = config_custom_base_url(config)
+    if configured:
+        return configured
+    env_value = first_env_setting(BASE_URL_ENV_KEYS)
+    return env_value or DEFAULT_BASE_URL
 
 
 def remember_current_auth(home: Path, auth: dict[str, object], state: dict[str, object]) -> None:
@@ -439,7 +459,8 @@ def switch_local(args: argparse.Namespace) -> int:
     auth = load_auth(auth_path)
     state = load_state(home)
     remember_current_auth(home, auth, state)
-    base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
+    current_config = read_config(config_path)
+    base_url = args.base_url or effective_local_base_url(state, current_config)
     model = args.model or effective_setting(state, "local_model", DEFAULT_MODEL)
     cached_key = state.get("local_api_key")
     api_key = args.api_key or str(auth.get("OPENAI_API_KEY") or "").strip()
@@ -456,7 +477,7 @@ def switch_local(args: argparse.Namespace) -> int:
     backup_file(config_path, backup_dir)
     save_state(home, state)
     write_auth(auth_path, "apikey", api_key)
-    config = rewrite_config_for_local(read_config(config_path), base_url, model)
+    config = rewrite_config_for_local(current_config, base_url, model)
     atomic_write(config_path, config, 0o600)
 
     print("Switched Codex to local relay API mode.")
@@ -528,13 +549,20 @@ def config_value(config: str, key: str) -> str:
     return match.group(1) if match else "(missing)"
 
 
-def custom_base_url(config: str) -> str:
+def config_custom_base_url(config: str) -> str | None:
     match = re.search(
         r"^\[model_providers\.custom\][\s\S]*?^base_url\s*=\s*\"([^\"]*)\"",
         config,
         re.MULTILINE,
     )
-    return match.group(1) if match else DEFAULT_BASE_URL
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def custom_base_url(config: str) -> str:
+    return config_custom_base_url(config) or DEFAULT_BASE_URL
 
 
 def current_local_api_key(auth: dict[str, object], state: dict[str, object]) -> str | None:
@@ -592,8 +620,9 @@ def needs_setup(_: argparse.Namespace) -> int:
 def config_show(_: argparse.Namespace) -> int:
     home = codex_home()
     state = load_state(home)
+    config = read_config(home / "config.toml")
     print(f"codex_home: {home}")
-    print(f"local_base_url: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
+    print(f"local_base_url: {effective_local_base_url(state, config)}")
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     return 0
@@ -602,8 +631,9 @@ def config_show(_: argparse.Namespace) -> int:
 def config_show_zh(_: argparse.Namespace) -> int:
     home = codex_home()
     state = load_state(home)
+    config = read_config(home / "config.toml")
     print(f"Codex 目录: {home}")
-    print(f"自定义 API 地址: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
+    print(f"自定义 API 地址: {effective_local_base_url(state, config)}")
     print(f"自定义模型: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
     print(f"官方模型: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     return 0

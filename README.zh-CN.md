@@ -31,6 +31,12 @@ cd codex-switch
 ./scripts/install.sh
 ```
 
+安装完成后会自动打开 App。如果只想安装不打开：
+
+```bash
+./scripts/install.sh --no-open
+```
+
 安装后会生成：
 
 ```text
