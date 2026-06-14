@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+exec /usr/bin/env python3 "$HOME/.local/share/codex-switch/src/codex_switch/cli.py" "$@"
