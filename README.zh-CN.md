@@ -2,6 +2,8 @@
 
 > 一个很小的 macOS 工具，用来一键切换 Codex 官方登录和自定义 API。
 
+App 带有一个原创的 Codex Switch 图标：保留一点 Codex 风格的环形科技感，但做成了变形的切换标识。
+
 Codex Switch 适合经常在两种模式之间切换的人：
 
 - **官方 OpenAI 模式**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`。

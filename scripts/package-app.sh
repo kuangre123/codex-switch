@@ -12,6 +12,7 @@ fi
 
 mkdir -p "$APP_DIR"
 osacompile -o "$APP_PATH" "$ROOT_DIR/scripts/Codex Switch.applescript"
+cp "$ROOT_DIR/assets/app-icon.icns" "$APP_PATH/Contents/Resources/applet.icns"
 RESOURCE_DIR="$APP_PATH/Contents/Resources/codex-switch"
 rm -rf "$RESOURCE_DIR"
 mkdir -p "$RESOURCE_DIR"

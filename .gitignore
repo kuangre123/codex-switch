@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 dist/
 build/
+assets/app-icon.iconset/
 *.egg-info/
 Codex Switch.app/
 *.log

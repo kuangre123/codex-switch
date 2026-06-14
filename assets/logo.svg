@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Codex Switch logo</title>
+  <defs>
+    <linearGradient id="bg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+    <linearGradient id="mint" x1="236" y1="252" x2="812" y2="764" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58F0C2"/>
+      <stop offset="1" stop-color="#2DA6FF"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="760" y1="248" x2="252" y2="780" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFB24A"/>
+      <stop offset="1" stop-color="#FF6B3D"/>
+    </linearGradient>
+    <filter id="softShadow" x="100" y="120" width="824" height="784" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="32" stdDeviation="36" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#bg)"/>
+  <g filter="url(#softShadow)">
+    <path d="M703 264C602 172 446 172 345 264L281 322C239 360 216 414 216 470C216 526 239 580 281 618L345 676C446 768 602 768 703 676" stroke="url(#mint)" stroke-width="118" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M321 760C422 852 578 852 679 760L743 702C785 664 808 610 808 554C808 498 785 444 743 406L679 348C578 256 422 256 321 348" stroke="url(#amber)" stroke-width="118" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M352 512H672" stroke="#F8FAFC" stroke-width="74" stroke-linecap="round"/>
+    <path d="M628 420L728 512L628 604" stroke="#F8FAFC" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
+

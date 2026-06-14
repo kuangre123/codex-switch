@@ -37,6 +37,7 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
 - Automatic backups under `~/.codex/backups`.
 - Session list protection: snapshot and rebuild `session_index.jsonl` when Codex hides local sessions after provider/account switches.
+- Original Codex Switch app icon inspired by the idea of switching routes, not a copy of the official Codex mark.
 - No stale OAuth token restore. Official mode resets auth to ChatGPT mode and lets Codex perform a fresh login when needed.
 - No Python dependencies beyond the standard library.
 
@@ -213,6 +214,12 @@ Package the macOS app:
 
 ```bash
 ./scripts/package-app.sh
+```
+
+Regenerate the app icon:
+
+```bash
+./scripts/generate-icon.py
 ```
 
 Install from a local checkout:
