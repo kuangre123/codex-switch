@@ -101,7 +101,7 @@ The app is Chinese-first. On first launch, if no local API key is configured, it
 
 Then it saves the settings and switches Codex to custom API mode.
 
-The app has four actions:
+The app has five actions:
 
 - **切换模式**: choose custom API or official OpenAI. After switching, the app can ask you to select recent conversations and move them to the recent end of Codex's session list.
 - **查看状态**: show current Codex auth/provider/model.
@@ -109,7 +109,7 @@ The app has four actions:
 - **检查更新**: check GitHub Releases and open the release page when a newer version exists.
 - **设置**: edit custom API base URL, custom model, and official model.
 
-切换后建议重启 Codex App，让界面刷新到新的 provider/model。
+After switching modes or saving settings, completely quit Codex App with `Cmd+Q` and reopen it. You do not need to proactively log out; in official mode, sign in again only if Codex asks.
 
 ### CLI
 
@@ -270,7 +270,7 @@ codex-switch sessions snapshot
 codex-switch sessions rebuild-index
 ```
 
-`snapshot` backs up the lightweight session list state. `rebuild-index` scans the local session JSONL files and recreates `~/.codex/session_index.jsonl`, preserving existing thread titles when possible. Restart Codex App after rebuilding.
+`snapshot` backs up the lightweight session list state. `rebuild-index` scans the local session JSONL files and recreates `~/.codex/session_index.jsonl`, preserving existing thread titles when possible. Completely quit Codex App with `Cmd+Q` and reopen it after rebuilding.
 
 ## License
 

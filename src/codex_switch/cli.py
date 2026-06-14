@@ -559,6 +559,7 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_session_snapshot(session_snapshot)
+    print("Quit and reopen Codex App for the mode change to take effect.")
     return 0
 
 
@@ -590,7 +591,8 @@ def switch_official(args: argparse.Namespace) -> int:
     print(f"model: {model}")
     print(f"backup_dir: {backup_dir}")
     print_session_snapshot(session_snapshot)
-    print("If Codex asks you to sign in, run: codex login")
+    print("Quit and reopen Codex App for the mode change to take effect.")
+    print("If Codex asks you to sign in, sign in with your official account again.")
     return 0
 
 
@@ -727,6 +729,7 @@ def config_set(args: argparse.Namespace) -> int:
             state[key] = stripped
     save_state(home, state)
     print("Saved Codex Switch settings.")
+    print("Quit and reopen Codex App for saved settings to take effect.")
     return config_show(args)
 
 
@@ -759,7 +762,7 @@ def sessions_rebuild_index(_: argparse.Namespace) -> int:
     print(f"sessions_added: {result['added']}")
     print(f"sessions_refreshed: {result['refreshed']}")
     print(f"sessions_indexed: {result['indexed']}")
-    print("Restart Codex App if the session list is already open.")
+    print("Quit and reopen Codex App if the session list is already open.")
     return 0
 
 
@@ -817,7 +820,7 @@ def sessions_promote(args: argparse.Namespace) -> int:
     print(f"backup: {backup or '(none)'}")
     print(f"sessions_selected: {len(selected_ids)}")
     print("Selected sessions were moved to the recent end of session_index.jsonl.")
-    print("Restart Codex App if the session list is already open.")
+    print("Quit and reopen Codex App if the session list is already open.")
     return 0
 
 
