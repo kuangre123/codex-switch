@@ -35,12 +35,14 @@ on openSwitcher()
 			set setupChoice to button returned of (display dialog "还没有配置 API Key，需要先填写自定义 API 信息。" buttons {"取消", "去配置"} default button "去配置" cancel button "取消" with title "Codex Switch")
 			if setupChoice is "去配置" then my openFirstRunSetup()
 		else
-			set resultText to my runSwitch("local") & return & return & "请重启 Codex App，让界面刷新到自定义 API 模式。"
+			set resultText to my runSwitch("local")
 			display dialog resultText buttons {"好"} default button "好" with title "Codex Switch"
+			my offerConversationPicker()
 		end if
 	else if targetMode is "官方 OpenAI" then
-		set resultText to my runSwitch("official") & return & return & "请重启 Codex App；如果需要，重新登录官方账号。"
+		set resultText to my runSwitch("official")
 		display dialog resultText buttons {"好"} default button "好" with title "Codex Switch"
+		my offerConversationPicker()
 	end if
 end openSwitcher
 
@@ -56,7 +58,8 @@ on openFirstRunSetup()
 	set apiKey to text returned of (display dialog "API Key" default answer "" buttons {"取消", "保存并切换"} default button "保存并切换" cancel button "取消" with title "Codex Switch 首次配置" with hidden answer)
 	
 	set resultText to my runSwitch("local --base-url " & quoted form of localBaseUrl & " --model " & quoted form of localModel & " --api-key " & quoted form of apiKey)
-	display dialog resultText & return & return & "已保存配置。请重启 Codex App，让界面刷新到自定义 API 模式。" buttons {"好"} default button "好" with title "Codex Switch"
+	display dialog resultText & return & return & "已保存配置。" buttons {"好"} default button "好" with title "Codex Switch"
+	my offerConversationPicker()
 end openFirstRunSetup
 
 on openSettings()
@@ -86,6 +89,49 @@ on openSessions()
 		display dialog resultText buttons {"好"} default button "好" with title "Codex Switch 会话工具"
 	end if
 end openSessions
+
+on offerConversationPicker()
+	set pickedButton to button returned of (display dialog "是否选择要继续的对话？" & return & return & "会显示最近 10 条，可多选。选中后会把这些对话排到最近列表，方便你在 Codex App 里继续打开。" buttons {"稍后", "选择对话"} default button "选择对话" cancel button "稍后" with title "Codex Switch")
+	if pickedButton is "选择对话" then my chooseRecentConversations()
+end offerConversationPicker
+
+on chooseRecentConversations()
+	set recentText to my runSwitch("sessions recent --limit 10")
+	if recentText starts with "失败" then
+		display dialog recentText buttons {"好"} default button "好" with title "Codex Switch 会话"
+		return
+	end if
+	if recentText is "" then
+		display dialog "没有找到最近对话。可以先在会话工具里重建会话索引。" buttons {"好"} default button "好" with title "Codex Switch 会话"
+		return
+	end if
+	
+	set oldDelimiters to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to return
+	set recentItems to text items of recentText
+	set AppleScript's text item delimiters to oldDelimiters
+	
+	set pickedItems to choose from list recentItems with title "Codex Switch 会话" with prompt "选择要继续的对话（可多选）" OK button name "置为最近" cancel button name "取消" with multiple selections allowed
+	if pickedItems is false then return
+	
+	set promoteCommand to "sessions promote"
+	repeat with itemText in pickedItems
+		set sessionId to my sessionIdFromChoice(itemText as text)
+		if sessionId is not "" then set promoteCommand to promoteCommand & " --id " & quoted form of sessionId
+	end repeat
+	
+	set resultText to my runSwitch(promoteCommand)
+	display dialog resultText & return & return & "请重启或刷新 Codex App，然后从最近会话里打开选中的对话。" buttons {"好"} default button "好" with title "Codex Switch 会话"
+end chooseRecentConversations
+
+on sessionIdFromChoice(choiceText)
+	set oldDelimiters to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to "#"
+	set partsList to text items of choiceText
+	set AppleScript's text item delimiters to oldDelimiters
+	if (count of partsList) is less than 2 then return ""
+	return item -1 of partsList
+end sessionIdFromChoice
 
 on currentValue(sourceText, keyName)
 	set oldDelimiters to AppleScript's text item delimiters
@@ -139,4 +185,3 @@ on fileExists(posixPath)
 		return false
 	end try
 end fileExists
-

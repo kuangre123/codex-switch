@@ -76,6 +76,8 @@ codex-switch official
 codex-switch sessions snapshot
 codex-switch sessions rebuild-index
 codex-switch sessions list
+codex-switch sessions recent --limit 10
+codex-switch sessions promote --id <session-id>
 ```
 
 修改默认 API 地址：
@@ -86,7 +88,9 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 
 或者在 App 里点 **Settings** 修改。
 
-App 主界面是中文的，包含 **切换模式**、**查看状态**、**会话工具**、**设置**。其中 **会话工具** 可以备份会话列表状态、重建会话索引、查看最近会话。
+App 主界面是中文的，包含 **切换模式**、**查看状态**、**会话工具**、**设置**。其中 **会话工具** 可以备份会话列表状态、重建会话索引、查看最近会话。切换模式成功后，App 会询问是否选择要继续的对话；可以从最近 10 条里多选，选中的对话会被排到 Codex 最近会话列表，方便刷新后继续打开。
+
+注意：这个工具不会修改会话正文，也不会直接强制 Codex Desktop 打开某个线程；它调整的是 `session_index.jsonl` 的最近顺序。
 
 ## 安全说明
 

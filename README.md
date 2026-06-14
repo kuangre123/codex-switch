@@ -103,7 +103,7 @@ Then it saves the settings and switches Codex to custom API mode.
 
 The app has four actions:
 
-- **切换模式**: choose custom API or official OpenAI.
+- **切换模式**: choose custom API or official OpenAI. After switching, the app can ask you to select recent conversations and move them to the recent end of Codex's session list.
 - **查看状态**: show current Codex auth/provider/model.
 - **会话工具**: snapshot session list state, rebuild the session index, or list recent indexed sessions.
 - **设置**: edit custom API base URL, custom model, and official model.
@@ -124,6 +124,8 @@ Session recovery:
 codex-switch sessions snapshot
 codex-switch sessions rebuild-index
 codex-switch sessions list
+codex-switch sessions recent --limit 10
+codex-switch sessions promote --id <session-id>
 ```
 
 Set custom defaults:

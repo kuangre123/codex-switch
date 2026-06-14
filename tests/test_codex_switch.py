@@ -521,6 +521,52 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertTrue(any(name.startswith("session_index.jsonl.") for name in backup_names))
             self.assertTrue(any(name.startswith(".codex-global-state.json.") for name in backup_names))
 
+    def test_sessions_recent_and_promote_selected_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir(parents=True)
+            rows = []
+            for index in range(12):
+                rows.append(
+                    {
+                        "id": f"session-{index:02d}",
+                        "thread_name": f"Thread {index:02d}",
+                        "updated_at": f"2026-06-14T10:{index:02d}:00.000000Z",
+                    }
+                )
+            (home / "session_index.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+            recent = run_tool(home, "sessions", "recent", "--limit", "10")
+
+            self.assertEqual(recent.returncode, 0, recent.stderr)
+            recent_lines = recent.stdout.splitlines()
+            self.assertEqual(len(recent_lines), 10)
+            self.assertIn("Thread 11 #session-11", recent_lines[0])
+            self.assertIn("Thread 02 #session-02", recent_lines[-1])
+
+            promoted = run_tool(
+                home,
+                "sessions",
+                "promote",
+                "--id",
+                "session-03",
+                "--id",
+                "session-05",
+            )
+
+            self.assertEqual(promoted.returncode, 0, promoted.stderr)
+            self.assertIn("sessions_selected: 2", promoted.stdout)
+            after_rows = [
+                json.loads(line)
+                for line in (home / "session_index.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual([row["id"] for row in after_rows[-2:]], ["session-03", "session-05"])
+            self.assertTrue(any(p.name.startswith("session_index.jsonl.") for p in (home / "backups").iterdir()))
+
 
 if __name__ == "__main__":
     unittest.main()

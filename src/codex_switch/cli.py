@@ -12,7 +12,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -384,6 +384,33 @@ def normalized_index_entry(entry: dict[str, object], session_id: str) -> dict[st
     return {"id": session_id, "thread_name": thread_name.strip(), "updated_at": updated_at.strip()}
 
 
+def session_sort_key(entry: dict[str, object]) -> tuple[datetime, str]:
+    parsed = parse_iso_datetime(entry.get("updated_at")) or datetime.fromtimestamp(0, tz=timezone.utc)
+    session_id = entry.get("id")
+    return parsed, session_id if isinstance(session_id, str) else ""
+
+
+def sorted_session_index_entries(entries: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    rows = [normalized_index_entry(entry, session_id) for session_id, entry in entries.items()]
+    return sorted(rows, key=session_sort_key)
+
+
+def session_choice_label(entry: dict[str, object]) -> str:
+    updated_at = parse_iso_datetime(entry.get("updated_at"))
+    updated = updated_at.strftime("%Y-%m-%d %H:%M") if updated_at is not None else "unknown-time"
+    title = str(entry.get("thread_name") or "Untitled").replace("\n", " ").strip()
+    session_id = str(entry.get("id") or "").strip()
+    return f"{updated} | {title} #{session_id}"
+
+
+def write_session_index(index_path: Path, rows: list[dict[str, object]]) -> None:
+    content = "".join(
+        json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for row in sorted(rows, key=session_sort_key)
+    )
+    atomic_write(index_path, content, 0o600)
+
+
 def rebuild_session_index(home: Path) -> dict[str, object]:
     index_path = home / "session_index.jsonl"
     backup = backup_file(index_path, home / "backups")
@@ -431,14 +458,8 @@ def rebuild_session_index(home: Path) -> dict[str, object]:
             "updated_at": render_iso_datetime(updated_at),
         }
 
-    def sort_key(entry: dict[str, object]) -> tuple[datetime, str]:
-        parsed = parse_iso_datetime(entry.get("updated_at")) or datetime.fromtimestamp(0, tz=timezone.utc)
-        session_id = entry.get("id")
-        return parsed, session_id if isinstance(session_id, str) else ""
-
-    rows = sorted(merged.values(), key=sort_key)
-    content = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows)
-    atomic_write(index_path, content, 0o600)
+    rows = sorted(merged.values(), key=session_sort_key)
+    write_session_index(index_path, rows)
     return {
         "index_path": index_path,
         "backup": backup,
@@ -694,14 +715,58 @@ def sessions_rebuild_index(_: argparse.Namespace) -> int:
 def sessions_list(_: argparse.Namespace) -> int:
     home = codex_home()
     entries = read_session_index(home / "session_index.jsonl")
-    rows = sorted(
-        (normalized_index_entry(entry, session_id) for session_id, entry in entries.items()),
-        key=lambda entry: parse_iso_datetime(entry.get("updated_at")) or datetime.fromtimestamp(0, tz=timezone.utc),
-    )
+    rows = sorted_session_index_entries(entries)
     print(f"codex_home: {home}")
     print(f"sessions_indexed: {len(rows)}")
     for entry in rows[-20:]:
         print(f"{entry['updated_at']}  {entry['id']}  {entry['thread_name']}")
+    return 0
+
+
+def sessions_recent(args: argparse.Namespace) -> int:
+    home = codex_home()
+    entries = read_session_index(home / "session_index.jsonl")
+    rows = list(reversed(sorted_session_index_entries(entries)))[: args.limit]
+    for entry in rows:
+        print(session_choice_label(entry))
+    return 0
+
+
+def sessions_promote(args: argparse.Namespace) -> int:
+    home = codex_home()
+    index_path = home / "session_index.jsonl"
+    entries = read_session_index(index_path)
+    if not entries:
+        raise SwitchError("No session index found. Run codex-switch sessions rebuild-index first.")
+
+    selected_ids: list[str] = []
+    for session_id in args.id:
+        stripped = session_id.strip()
+        if stripped and stripped not in selected_ids:
+            selected_ids.append(stripped)
+    if not selected_ids:
+        raise SwitchError("No session ids selected.")
+
+    missing = [session_id for session_id in selected_ids if session_id not in entries]
+    if missing:
+        raise SwitchError(f"Session id not found in index: {', '.join(missing)}")
+
+    backup = backup_file(index_path, home / "backups")
+    rows_by_id = {
+        session_id: normalized_index_entry(entry, session_id)
+        for session_id, entry in entries.items()
+    }
+    base_time = datetime.now(timezone.utc)
+    for offset, session_id in enumerate(selected_ids, start=1):
+        rows_by_id[session_id]["updated_at"] = render_iso_datetime(base_time + timedelta(microseconds=offset))
+    write_session_index(index_path, list(rows_by_id.values()))
+
+    print(f"codex_home: {home}")
+    print(f"index_path: {index_path}")
+    print(f"backup: {backup or '(none)'}")
+    print(f"sessions_selected: {len(selected_ids)}")
+    print("Selected sessions were moved to the recent end of session_index.jsonl.")
+    print("Restart Codex App if the session list is already open.")
     return 0
 
 
@@ -759,6 +824,12 @@ def build_parser() -> argparse.ArgumentParser:
     sessions_rebuild_parser.set_defaults(func=sessions_rebuild_index)
     sessions_list_parser = sessions_subparsers.add_parser("list", help="Show recent sessions from session_index.jsonl.")
     sessions_list_parser.set_defaults(func=sessions_list)
+    sessions_recent_parser = sessions_subparsers.add_parser("recent", help="Print recent session choices for the app UI.")
+    sessions_recent_parser.add_argument("--limit", type=int, default=10, help="Number of recent sessions to print.")
+    sessions_recent_parser.set_defaults(func=sessions_recent)
+    sessions_promote_parser = sessions_subparsers.add_parser("promote", help="Move selected sessions to the recent end.")
+    sessions_promote_parser.add_argument("--id", action="append", required=True, help="Session id to promote. Can be repeated.")
+    sessions_promote_parser.set_defaults(func=sessions_promote)
 
     return parser
 
