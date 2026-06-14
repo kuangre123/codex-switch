@@ -59,6 +59,31 @@ def read_state(home: Path) -> dict:
     return json.loads((home / "codex-switch-state.json").read_text(encoding="utf-8"))
 
 
+def write_session_file(home: Path, folder: str, session_id: str, cwd: str, timestamp: str) -> None:
+    target = home / folder / "2026" / "06" / "14" / f"{session_id}.jsonl"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": session_id,
+                            "timestamp": timestamp,
+                            "cwd": cwd,
+                            "model_provider": "custom",
+                        },
+                    }
+                ),
+                json.dumps({"type": "event_msg", "payload": {"timestamp": timestamp}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class CodexSwitchTests(unittest.TestCase):
     def test_local_switch_preserves_unrelated_config_and_stores_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -97,6 +122,28 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertTrue((home / "backups").is_dir())
             self.assertTrue(any(p.name.startswith("config.toml.") for p in (home / "backups").iterdir()))
             self.assertEqual(stat.S_IMODE((home / "auth.json").stat().st_mode), 0o600)
+
+    def test_switch_snapshots_session_index_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "session_index.jsonl").write_text(
+                json.dumps({"id": "session-1", "thread_name": "Old title", "updated_at": "2026-06-14T10:00:00Z"}) + "\n",
+                encoding="utf-8",
+            )
+            (home / ".codex-global-state.json").write_text("{}", encoding="utf-8")
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--api-key", "sk-test-secret")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            backup_names = [p.name for p in (home / "backups").iterdir()]
+            self.assertTrue(any(name.startswith("session_index.jsonl.") for name in backup_names))
+            self.assertTrue(any(name.startswith(".codex-global-state.json.") for name in backup_names))
+            self.assertIn("session_snapshot:", result.stdout)
 
     def test_official_switch_uses_chatgpt_auth_and_keeps_config_route(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -288,6 +335,76 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model = "gpt-cached-official"', config)
+
+    def test_sessions_rebuild_index_adds_missing_and_preserves_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir(parents=True)
+            session_existing = "019existing-session"
+            session_missing = "019missing-session"
+            (home / "session_index.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": session_existing,
+                        "thread_name": "Keep This Title",
+                        "updated_at": "2026-06-14T09:00:00.000000Z",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            write_session_file(
+                home,
+                "sessions",
+                session_existing,
+                "/Users/example/old-project",
+                "2026-06-14T10:00:00.000000Z",
+            )
+            write_session_file(
+                home,
+                "sessions",
+                session_missing,
+                "/Users/example/new-project",
+                "2026-06-14T11:00:00.000000Z",
+            )
+            write_session_file(
+                home,
+                "archived_sessions",
+                session_missing,
+                "/Users/example/new-project-archive",
+                "2026-06-14T08:00:00.000000Z",
+            )
+
+            result = run_tool(home, "sessions", "rebuild-index")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("sessions_added: 1", result.stdout)
+            self.assertIn("sessions_discovered: 2", result.stdout)
+            rows = [
+                json.loads(line)
+                for line in (home / "session_index.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            by_id = {row["id"]: row for row in rows}
+            self.assertEqual(by_id[session_existing]["thread_name"], "Keep This Title")
+            self.assertEqual(by_id[session_missing]["thread_name"], "new-project")
+            self.assertEqual(by_id[session_missing]["updated_at"], "2026-06-14T11:00:00.000000Z")
+            self.assertTrue(any(p.name.startswith("session_index.jsonl.") for p in (home / "backups").iterdir()))
+
+    def test_sessions_snapshot_command_backs_up_lightweight_session_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir(parents=True)
+            (home / "session_index.jsonl").write_text("{}", encoding="utf-8")
+            (home / ".codex-global-state.json").write_text("{}", encoding="utf-8")
+
+            result = run_tool(home, "sessions", "snapshot")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            backup_names = [p.name for p in (home / "backups").iterdir()]
+            self.assertTrue(any(name.startswith("session_index.jsonl.") for name in backup_names))
+            self.assertTrue(any(name.startswith(".codex-global-state.json.") for name in backup_names))
 
 
 if __name__ == "__main__":

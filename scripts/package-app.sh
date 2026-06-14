@@ -12,4 +12,12 @@ fi
 
 mkdir -p "$APP_DIR"
 osacompile -o "$APP_PATH" "$ROOT_DIR/scripts/Codex Switch.applescript"
+RESOURCE_DIR="$APP_PATH/Contents/Resources/codex-switch"
+rm -rf "$RESOURCE_DIR"
+mkdir -p "$RESOURCE_DIR"
+rsync -a --delete \
+  --exclude '.git' \
+  --exclude '.DS_Store' \
+  --exclude 'dist' \
+  "$ROOT_DIR/" "$RESOURCE_DIR/"
 echo "$APP_PATH"

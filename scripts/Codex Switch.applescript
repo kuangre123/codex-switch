@@ -1,12 +1,15 @@
 on run
 	set currentStatus to my runSwitch("status")
-	set actionButtons to {"Switch", "Status", "Settings"}
-	set picked to button returned of (display dialog currentStatus buttons actionButtons default button "Switch" with title "Codex Switch")
+	set pickedList to choose from list {"Switch", "Status", "Sessions", "Settings"} with title "Codex Switch" with prompt currentStatus default items {"Switch"}
+	if pickedList is false then return
+	set picked to item 1 of pickedList
 	
 	if picked is "Switch" then
 		my openSwitcher()
 	else if picked is "Settings" then
 		my openSettings()
+	else if picked is "Sessions" then
+		my openSessions()
 	else
 		display dialog currentStatus buttons {"OK"} default button "OK" with title "Codex Switch"
 	end if
@@ -34,6 +37,22 @@ on openSettings()
 	display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch Settings"
 end openSettings
 
+on openSessions()
+	set pickedList to choose from list {"Snapshot", "Rebuild Index", "List Recent"} with title "Codex Switch Sessions" with prompt "Session tools" default items {"Rebuild Index"}
+	if pickedList is false then return
+	set picked to item 1 of pickedList
+	if picked is "Snapshot" then
+		set resultText to my runSwitch("sessions snapshot")
+		display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch Sessions"
+	else if picked is "Rebuild Index" then
+		set resultText to my runSwitch("sessions rebuild-index") & return & return & "Restart Codex App so the session list refreshes."
+		display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch Sessions"
+	else if picked is "List Recent" then
+		set resultText to my runSwitch("sessions list")
+		display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch Sessions"
+	end if
+end openSessions
+
 on currentValue(sourceText, keyName)
 	set oldDelimiters to AppleScript's text item delimiters
 	try
@@ -55,14 +74,34 @@ end currentValue
 
 on runSwitch(commandName)
 	try
-		set switchTool to (POSIX path of (path to home folder)) & ".local/bin/codex-switch"
+		set switchTool to my switchToolCommand()
 		if commandName contains " " then
-			set shellCommand to quoted form of switchTool & space & commandName
+			set shellCommand to switchTool & space & commandName
 		else
-			set shellCommand to quoted form of switchTool & space & quoted form of commandName
+			set shellCommand to switchTool & space & quoted form of commandName
 		end if
 		return do shell script shellCommand
 	on error errorMessage number errorNumber
 		return "Failed (" & errorNumber & "):" & return & errorMessage
 	end try
 end runSwitch
+
+on switchToolCommand()
+	set installedTool to (POSIX path of (path to home folder)) & ".local/bin/codex-switch"
+	if my fileExists(installedTool) then return quoted form of installedTool
+	
+	set appPath to POSIX path of (path to me)
+	set bundledCli to appPath & "Contents/Resources/codex-switch/src/codex_switch/cli.py"
+	if my fileExists(bundledCli) then return "/usr/bin/env python3 " & quoted form of bundledCli
+	
+	error "codex-switch CLI was not found. Reinstall the app or run scripts/install.sh."
+end switchToolCommand
+
+on fileExists(posixPath)
+	try
+		do shell script "test -f " & quoted form of posixPath
+		return true
+	on error
+		return false
+	end try
+end fileExists

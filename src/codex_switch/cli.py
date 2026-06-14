@@ -12,7 +12,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -20,6 +20,8 @@ DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
+SESSION_SNAPSHOT_FILES = ("session_index.jsonl", ".codex-global-state.json")
+SESSION_DIRS = ("sessions", "archived_sessions")
 
 
 class SwitchError(RuntimeError):
@@ -83,11 +85,11 @@ def remember_current_auth(home: Path, auth: dict[str, object], state: dict[str, 
     state.pop("official_auth", None)
 
 
-def backup_file(path: Path, backup_dir: Path) -> Path | None:
+def backup_file(path: Path, backup_dir: Path, timestamp: str | None = None) -> Path | None:
     if not path.exists():
         return None
     backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
     target = backup_dir / f"{path.name}.{timestamp}.bak"
     counter = 1
     while target.exists():
@@ -218,6 +220,216 @@ def read_config(config_path: Path) -> str:
     return config_path.read_text(encoding="utf-8")
 
 
+def snapshot_session_state(home: Path, backup_dir: Path | None = None) -> list[Path]:
+    backup_dir = backup_dir or home / "backups"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    copied: list[Path] = []
+    for name in SESSION_SNAPSHOT_FILES:
+        backup = backup_file(home / name, backup_dir, timestamp)
+        if backup is not None:
+            copied.append(backup)
+    return copied
+
+
+def print_session_snapshot(copied: list[Path]) -> None:
+    if copied:
+        print("session_snapshot:")
+        for path in copied:
+            print(f"  {path}")
+    else:
+        print("session_snapshot: (no session index/global state found)")
+
+
+def parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def render_iso_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def file_mtime(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def read_session_index(index_path: Path) -> dict[str, dict[str, object]]:
+    if not index_path.exists():
+        return {}
+    entries: dict[str, dict[str, object]] = {}
+    with index_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            session_id = entry.get("id")
+            if isinstance(session_id, str) and session_id.strip():
+                entries[session_id.strip()] = entry
+    return entries
+
+
+def iter_session_files(home: Path) -> list[Path]:
+    files: list[Path] = []
+    for name in SESSION_DIRS:
+        root = home / name
+        if root.is_file() and root.suffix == ".jsonl":
+            files.append(root)
+        elif root.is_dir():
+            files.extend(path for path in root.rglob("*.jsonl") if path.is_file())
+    return sorted(files)
+
+
+def newest_datetime(left: datetime | None, right: datetime | None) -> datetime | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return max(left, right)
+
+
+def parse_session_file(path: Path) -> dict[str, object] | None:
+    session_id: str | None = None
+    cwd: str | None = None
+    updated_at: datetime | None = None
+
+    try:
+        handle = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    with handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+
+            payload = event.get("payload")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            if event.get("type") == "session_meta" or "cwd" in payload_dict:
+                candidate_id = payload_dict.get("id")
+                if session_id is None and isinstance(candidate_id, str) and candidate_id.strip():
+                    session_id = candidate_id.strip()
+                candidate_cwd = payload_dict.get("cwd")
+                if cwd is None and isinstance(candidate_cwd, str) and candidate_cwd.strip():
+                    cwd = candidate_cwd.strip()
+
+            for source in (event, payload_dict):
+                for key in ("updated_at", "timestamp"):
+                    updated_at = newest_datetime(updated_at, parse_iso_datetime(source.get(key)))
+
+    if session_id is None:
+        return None
+    if updated_at is None:
+        updated_at = file_mtime(path)
+    return {"id": session_id, "cwd": cwd, "updated_at": updated_at, "path": path}
+
+
+def fallback_thread_name(cwd: object, session_id: str) -> str:
+    if isinstance(cwd, str) and cwd.strip():
+        name = Path(cwd.strip()).name
+        if name:
+            return name
+    return f"Untitled {session_id[:8]}"
+
+
+def normalized_index_entry(entry: dict[str, object], session_id: str) -> dict[str, object]:
+    thread_name = entry.get("thread_name")
+    if not isinstance(thread_name, str) or not thread_name.strip():
+        thread_name = fallback_thread_name(None, session_id)
+    updated_at = entry.get("updated_at")
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        updated_at = render_iso_datetime(datetime.fromtimestamp(0, tz=timezone.utc))
+    return {"id": session_id, "thread_name": thread_name.strip(), "updated_at": updated_at.strip()}
+
+
+def rebuild_session_index(home: Path) -> dict[str, object]:
+    index_path = home / "session_index.jsonl"
+    backup = backup_file(index_path, home / "backups")
+    existing = read_session_index(index_path)
+    discovered: dict[str, dict[str, object]] = {}
+    scanned = 0
+
+    for path in iter_session_files(home):
+        scanned += 1
+        record = parse_session_file(path)
+        if record is None:
+            continue
+        session_id = record["id"]
+        if not isinstance(session_id, str):
+            continue
+        previous = discovered.get(session_id)
+        if previous is None:
+            discovered[session_id] = record
+            continue
+        current_updated = record.get("updated_at") if isinstance(record.get("updated_at"), datetime) else None
+        previous_updated = previous.get("updated_at") if isinstance(previous.get("updated_at"), datetime) else None
+        if current_updated is not None and (previous_updated is None or current_updated > previous_updated):
+            discovered[session_id] = record
+
+    merged = {session_id: normalized_index_entry(entry, session_id) for session_id, entry in existing.items()}
+    added = 0
+    refreshed = 0
+    for session_id, record in discovered.items():
+        existing_entry = existing.get(session_id, {})
+        if session_id not in existing:
+            added += 1
+        else:
+            refreshed += 1
+        existing_name = existing_entry.get("thread_name")
+        if isinstance(existing_name, str) and existing_name.strip():
+            thread_name = existing_name.strip()
+        else:
+            thread_name = fallback_thread_name(record.get("cwd"), session_id)
+        updated_at = record.get("updated_at")
+        if not isinstance(updated_at, datetime):
+            updated_at = file_mtime(record["path"]) if isinstance(record.get("path"), Path) else datetime.now(timezone.utc)
+        merged[session_id] = {
+            "id": session_id,
+            "thread_name": thread_name,
+            "updated_at": render_iso_datetime(updated_at),
+        }
+
+    def sort_key(entry: dict[str, object]) -> tuple[datetime, str]:
+        parsed = parse_iso_datetime(entry.get("updated_at")) or datetime.fromtimestamp(0, tz=timezone.utc)
+        session_id = entry.get("id")
+        return parsed, session_id if isinstance(session_id, str) else ""
+
+    rows = sorted(merged.values(), key=sort_key)
+    content = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows)
+    atomic_write(index_path, content, 0o600)
+    return {
+        "index_path": index_path,
+        "backup": backup,
+        "scanned": scanned,
+        "discovered": len(discovered),
+        "indexed": len(rows),
+        "added": added,
+        "refreshed": refreshed,
+    }
+
+
 def switch_local(args: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
@@ -237,6 +449,7 @@ def switch_local(args: argparse.Namespace) -> int:
         raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
     state["local_api_key"] = api_key
 
+    session_snapshot = snapshot_session_state(home, backup_dir)
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     save_state(home, state)
@@ -250,6 +463,7 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"model: {model}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
+    print_session_snapshot(session_snapshot)
     return 0
 
 
@@ -265,6 +479,7 @@ def switch_official(args: argparse.Namespace) -> int:
     model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
     official_auth = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None}
 
+    session_snapshot = snapshot_session_state(home, backup_dir)
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     save_state(home, state)
@@ -278,6 +493,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print("model_provider: openai")
     print(f"model: {model}")
     print(f"backup_dir: {backup_dir}")
+    print_session_snapshot(session_snapshot)
     print("If Codex asks you to sign in, run: codex login")
     return 0
 
@@ -341,6 +557,45 @@ def prompt_api_key(args: argparse.Namespace) -> int:
     return switch_local(args)
 
 
+def sessions_snapshot(_: argparse.Namespace) -> int:
+    home = codex_home()
+    backup_dir = home / "backups"
+    copied = snapshot_session_state(home, backup_dir)
+    print(f"codex_home: {home}")
+    print(f"backup_dir: {backup_dir}")
+    print_session_snapshot(copied)
+    return 0
+
+
+def sessions_rebuild_index(_: argparse.Namespace) -> int:
+    home = codex_home()
+    result = rebuild_session_index(home)
+    print(f"codex_home: {home}")
+    print(f"index_path: {result['index_path']}")
+    print(f"backup: {result['backup'] or '(none)'}")
+    print(f"session_files_scanned: {result['scanned']}")
+    print(f"sessions_discovered: {result['discovered']}")
+    print(f"sessions_added: {result['added']}")
+    print(f"sessions_refreshed: {result['refreshed']}")
+    print(f"sessions_indexed: {result['indexed']}")
+    print("Restart Codex App if the session list is already open.")
+    return 0
+
+
+def sessions_list(_: argparse.Namespace) -> int:
+    home = codex_home()
+    entries = read_session_index(home / "session_index.jsonl")
+    rows = sorted(
+        (normalized_index_entry(entry, session_id) for session_id, entry in entries.items()),
+        key=lambda entry: parse_iso_datetime(entry.get("updated_at")) or datetime.fromtimestamp(0, tz=timezone.utc),
+    )
+    print(f"codex_home: {home}")
+    print(f"sessions_indexed: {len(rows)}")
+    for entry in rows[-20:]:
+        print(f"{entry['updated_at']}  {entry['id']}  {entry['thread_name']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-switch",
@@ -375,6 +630,18 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser.add_argument("--local-model", help="Default local model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.set_defaults(func=config_set)
+
+    sessions_parser = subparsers.add_parser("sessions", help="Protect or recover Codex session list state.")
+    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command", required=True)
+    sessions_snapshot_parser = sessions_subparsers.add_parser("snapshot", help="Back up Codex session list state.")
+    sessions_snapshot_parser.set_defaults(func=sessions_snapshot)
+    sessions_rebuild_parser = sessions_subparsers.add_parser(
+        "rebuild-index",
+        help="Rebuild session_index.jsonl from local session JSONL files.",
+    )
+    sessions_rebuild_parser.set_defaults(func=sessions_rebuild_index)
+    sessions_list_parser = sessions_subparsers.add_parser("list", help="Show recent sessions from session_index.jsonl.")
+    sessions_list_parser.set_defaults(func=sessions_list)
 
     return parser
 

@@ -31,11 +31,12 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 
 ## Features
 
-- One-click macOS app: switch, status, settings.
+- One-click macOS app: switch, status, settings, session recovery.
 - CLI for scripting and quick terminal use.
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
 - Automatic backups under `~/.codex/backups`.
+- Session list protection: snapshot and rebuild `session_index.jsonl` when Codex hides local sessions after provider/account switches.
 - No stale OAuth token restore. Official mode resets auth to ChatGPT mode and lets Codex perform a fresh login when needed.
 - No Python dependencies beyond the standard library.
 
@@ -81,10 +82,11 @@ Open:
 open "$HOME/Applications/Codex Switch.app"
 ```
 
-The app has three actions:
+The app has four actions:
 
 - **Switch**: choose `Local custom` or `Official OpenAI`.
 - **Status**: show current Codex auth/provider/model.
+- **Sessions**: snapshot session list state, rebuild the session index, or list recent indexed sessions.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
 切换后建议重启 Codex App，让界面刷新到新的 provider/model。
@@ -95,6 +97,14 @@ The app has three actions:
 codex-switch status
 codex-switch local
 codex-switch official
+```
+
+Session recovery:
+
+```bash
+codex-switch sessions snapshot
+codex-switch sessions rebuild-index
+codex-switch sessions list
 ```
 
 Set custom defaults:
@@ -133,6 +143,15 @@ Backups are written before every switch:
 ```text
 ~/.codex/backups/
 ```
+
+Switching modes also snapshots lightweight session list files:
+
+```text
+~/.codex/session_index.jsonl
+~/.codex/.codex-global-state.json
+```
+
+It does not copy the full `sessions/` folder by default, because local Codex history can be hundreds of MB. The original session JSONL files stay in place and can be used to rebuild the index.
 
 Custom mode writes:
 
@@ -209,6 +228,19 @@ Yes. Set it in the app settings or run:
 ```bash
 codex-switch config set --local-base-url https://your-endpoint.example.com
 ```
+
+**Will switching relay/proxy endpoints lose sessions?**
+
+It should not delete your actual session files. They are stored under `~/.codex/sessions` and `~/.codex/archived_sessions`. What can happen is that Codex Desktop shows an empty or incomplete list after account/provider changes because `session_index.jsonl` or UI state no longer lines up with the current mode.
+
+Codex Switch now protects that path in two ways:
+
+```bash
+codex-switch sessions snapshot
+codex-switch sessions rebuild-index
+```
+
+`snapshot` backs up the lightweight session list state. `rebuild-index` scans the local session JSONL files and recreates `~/.codex/session_index.jsonl`, preserving existing thread titles when possible. Restart Codex App after rebuilding.
 
 ## License
 

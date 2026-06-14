@@ -54,6 +54,14 @@ codex-switch local
 codex-switch official
 ```
 
+会话列表保护/恢复：
+
+```bash
+codex-switch sessions snapshot
+codex-switch sessions rebuild-index
+codex-switch sessions list
+```
+
 修改默认 API 地址：
 
 ```bash
@@ -62,6 +70,8 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 
 或者在 App 里点 **Settings** 修改。
 
+App 里也有 **Sessions** 入口，可以备份会话列表状态、重建会话索引、查看最近会话。
+
 ## 安全说明
 
 每次切换前都会备份：
@@ -69,6 +79,27 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 ```text
 ~/.codex/backups/
 ```
+
+切换模式时还会自动备份轻量会话列表文件：
+
+```text
+~/.codex/session_index.jsonl
+~/.codex/.codex-global-state.json
+```
+
+不会默认复制整个 `sessions/` 目录，因为历史会话可能很大。真实会话文件仍留在 `~/.codex/sessions` 和 `~/.codex/archived_sessions`，需要时可以从它们重建索引。
+
+## 会不会丢 sessions？
+
+换官方/中转站通常不会删除真实会话文件。更常见的问题是 Codex Desktop 在账号、provider 或模型切换后，会话列表索引 `session_index.jsonl` 或界面状态没对上，所以看起来像“丢了”。
+
+如果列表不见了，可以先执行：
+
+```bash
+codex-switch sessions rebuild-index
+```
+
+它会扫描本地 session JSONL 文件，重新生成 `~/.codex/session_index.jsonl`，并尽量保留已有标题。执行后重启 Codex App 让列表刷新。
 
 官方模式不会恢复旧 OAuth token，因为 refresh token 可能是一次性轮换的，恢复旧 token 会导致登录刷新失败。
 
