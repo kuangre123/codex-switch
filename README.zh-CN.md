@@ -13,6 +13,16 @@ Codex Switch 适合经常在两种模式之间切换的人：
 https://jp.icodeeasy.cc
 ```
 
+## 下载 App
+
+直接到 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载：
+
+```text
+Codex-Switch-macOS.zip
+```
+
+解压后把 `Codex Switch.app` 放到 `~/Applications` 或 `/Applications`。首次打开如果 macOS 提示不明开发者，右键选择 **打开**。
+
 ## 安装
 
 ```bash

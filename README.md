@@ -6,6 +6,18 @@ Codex Switch is a lightweight helper for people who bounce between the official 
 
 中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并避免恢复过期 OAuth refresh token。
 
+## Download App
+
+Download the latest macOS app from [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest):
+
+```text
+Codex-Switch-macOS.zip
+```
+
+Unzip it, move `Codex Switch.app` to `~/Applications` or `/Applications`, then open it. On first launch, macOS may ask you to right-click and choose **Open** because the app is unsigned.
+
+中文：你可以直接在 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载 `Codex-Switch-macOS.zip`。解压后把 `Codex Switch.app` 放进 `~/Applications` 或 `/Applications`，首次打开如果 macOS 提示不明开发者，右键选择 **打开**。
+
 ## Why
 
 Codex users often need two modes:
