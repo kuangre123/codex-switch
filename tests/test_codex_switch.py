@@ -5,12 +5,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Dict, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src" / "codex_switch" / "cli.py"
+sys.path.insert(0, str(ROOT / "src"))
+from codex_switch import cli  # noqa: E402
 
 
 def run_tool(home: Path, *args: str, extra_env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
@@ -566,6 +571,57 @@ class CodexSwitchTests(unittest.TestCase):
             ]
             self.assertEqual([row["id"] for row in after_rows[-2:]], ["session-03", "session-05"])
             self.assertTrue(any(p.name.startswith("session_index.jsonl.") for p in (home / "backups").iterdir()))
+
+    def test_update_check_reports_available_release(self) -> None:
+        original = cli.fetch_latest_release
+        cli.fetch_latest_release = lambda: {
+            "tag_name": "v0.2.0",
+            "html_url": "https://github.com/kuangre123/codex-switch/releases/tag/v0.2.0",
+        }
+        try:
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli.main(["update", "check"]), 0)
+        finally:
+            cli.fetch_latest_release = original
+
+        text = output.getvalue()
+        self.assertIn("current_version: 0.1.0", text)
+        self.assertIn("latest_version: 0.2.0", text)
+        self.assertIn("update_available: yes", text)
+        self.assertIn("release_url: https://github.com/kuangre123/codex-switch/releases/tag/v0.2.0", text)
+
+    def test_update_check_reports_current_release(self) -> None:
+        original = cli.fetch_latest_release
+        cli.fetch_latest_release = lambda: {
+            "tag_name": "v0.1.0",
+            "html_url": "https://github.com/kuangre123/codex-switch/releases/tag/v0.1.0",
+        }
+        try:
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli.main(["update", "check"]), 0)
+        finally:
+            cli.fetch_latest_release = original
+
+        self.assertIn("update_available: no", output.getvalue())
+
+    def test_fetch_latest_release_prefers_release_redirect_url(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return "https://github.com/kuangre123/codex-switch/releases/tag/v0.3.0"
+
+        with mock.patch.object(cli.urllib.request, "urlopen", return_value=FakeResponse()):
+            release = cli.fetch_latest_release()
+
+        self.assertEqual(release["tag_name"], "v0.3.0")
+        self.assertEqual(release["html_url"], "https://github.com/kuangre123/codex-switch/releases/tag/v0.3.0")
 
 
 if __name__ == "__main__":

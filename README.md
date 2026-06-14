@@ -106,6 +106,7 @@ The app has four actions:
 - **切换模式**: choose custom API or official OpenAI. After switching, the app can ask you to select recent conversations and move them to the recent end of Codex's session list.
 - **查看状态**: show current Codex auth/provider/model.
 - **会话工具**: snapshot session list state, rebuild the session index, or list recent indexed sessions.
+- **检查更新**: check GitHub Releases and open the release page when a newer version exists.
 - **设置**: edit custom API base URL, custom model, and official model.
 
 切换后建议重启 Codex App，让界面刷新到新的 provider/model。
@@ -116,6 +117,8 @@ The app has four actions:
 codex-switch status
 codex-switch local
 codex-switch official
+codex-switch version
+codex-switch update check
 ```
 
 Session recovery:

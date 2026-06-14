@@ -13,7 +13,7 @@ end run
 
 on openMainMenu()
 	set currentStatus to my runSwitch("status-zh")
-	set pickedList to choose from list {"切换模式", "查看状态", "会话工具", "设置"} with title "Codex Switch" with prompt currentStatus default items {"切换模式"}
+	set pickedList to choose from list {"切换模式", "查看状态", "会话工具", "检查更新", "设置"} with title "Codex Switch" with prompt currentStatus default items {"切换模式"}
 	if pickedList is false then return
 	set picked to item 1 of pickedList
 	
@@ -23,6 +23,8 @@ on openMainMenu()
 		my openSettings()
 	else if picked is "会话工具" then
 		my openSessions()
+	else if picked is "检查更新" then
+		my checkForUpdates()
 	else
 		display dialog currentStatus buttons {"好"} default button "好" with title "Codex Switch"
 	end if
@@ -96,42 +98,57 @@ on offerConversationPicker()
 end offerConversationPicker
 
 on chooseRecentConversations()
-	set recentText to my runSwitch("sessions recent --limit 10")
-	if recentText starts with "失败" then
-		display dialog recentText buttons {"好"} default button "好" with title "Codex Switch 会话"
+	set selectedText to my runSessionPicker()
+	if selectedText starts with "失败" then
+		display dialog selectedText buttons {"好"} default button "好" with title "Codex Switch 会话"
 		return
 	end if
-	if recentText is "" then
-		display dialog "没有找到最近对话。可以先在会话工具里重建会话索引。" buttons {"好"} default button "好" with title "Codex Switch 会话"
-		return
-	end if
+	if selectedText is "" then return
 	
 	set oldDelimiters to AppleScript's text item delimiters
 	set AppleScript's text item delimiters to return
-	set recentItems to text items of recentText
+	set selectedIds to text items of selectedText
 	set AppleScript's text item delimiters to oldDelimiters
 	
-	set pickedItems to choose from list recentItems with title "Codex Switch 会话" with prompt "选择要继续的对话（可多选）" OK button name "置为最近" cancel button name "取消" with multiple selections allowed
-	if pickedItems is false then return
-	
 	set promoteCommand to "sessions promote"
-	repeat with itemText in pickedItems
-		set sessionId to my sessionIdFromChoice(itemText as text)
-		if sessionId is not "" then set promoteCommand to promoteCommand & " --id " & quoted form of sessionId
+	repeat with sessionId in selectedIds
+		set sessionIdText to sessionId as text
+		if sessionIdText is not "" then set promoteCommand to promoteCommand & " --id " & quoted form of sessionIdText
 	end repeat
 	
 	set resultText to my runSwitch(promoteCommand)
 	display dialog resultText & return & return & "请重启或刷新 Codex App，然后从最近会话里打开选中的对话。" buttons {"好"} default button "好" with title "Codex Switch 会话"
 end chooseRecentConversations
 
-on sessionIdFromChoice(choiceText)
-	set oldDelimiters to AppleScript's text item delimiters
-	set AppleScript's text item delimiters to "#"
-	set partsList to text items of choiceText
-	set AppleScript's text item delimiters to oldDelimiters
-	if (count of partsList) is less than 2 then return ""
-	return item -1 of partsList
-end sessionIdFromChoice
+on checkForUpdates()
+	set resultText to my runSwitch("update check")
+	if resultText starts with "失败" then
+		display dialog resultText buttons {"好"} default button "好" with title "Codex Switch 更新"
+		return
+	end if
+	
+	set currentVersion to my currentValue(resultText, "current_version")
+	set latestVersion to my currentValue(resultText, "latest_version")
+	set updateAvailable to my currentValue(resultText, "update_available")
+	set releaseUrl to my currentValue(resultText, "release_url")
+	
+	if updateAvailable is "yes" then
+		set pickedButton to button returned of (display dialog "发现新版本。" & return & return & "当前版本：" & currentVersion & return & "最新版本：" & latestVersion buttons {"稍后", "打开 GitHub"} default button "打开 GitHub" cancel button "稍后" with title "Codex Switch 更新")
+		if pickedButton is "打开 GitHub" then open location releaseUrl
+	else
+		display dialog "已经是最新版本。" & return & return & "当前版本：" & currentVersion buttons {"好"} default button "好" with title "Codex Switch 更新"
+	end if
+end checkForUpdates
+
+on runSessionPicker()
+	try
+		set pickerTool to my sessionPickerCommand()
+		set switchTool to my switchToolCommand()
+		return do shell script pickerTool & space & quoted form of switchTool
+	on error errorMessage number errorNumber
+		return "失败 (" & errorNumber & "):" & return & errorMessage
+	end try
+end runSessionPicker
 
 on currentValue(sourceText, keyName)
 	set oldDelimiters to AppleScript's text item delimiters
@@ -165,6 +182,17 @@ on runSwitch(commandName)
 		return "失败 (" & errorNumber & "):" & return & errorMessage
 	end try
 end runSwitch
+
+on sessionPickerCommand()
+	set installedPicker to (POSIX path of (path to home folder)) & ".local/share/codex-switch/scripts/session-picker.py"
+	if my fileExists(installedPicker) then return "/usr/bin/env python3 " & quoted form of installedPicker
+	
+	set appPath to POSIX path of (path to me)
+	set bundledPicker to appPath & "Contents/Resources/codex-switch/scripts/session-picker.py"
+	if my fileExists(bundledPicker) then return "/usr/bin/env python3 " & quoted form of bundledPicker
+	
+	error "找不到会话选择器，请重新安装 App 或运行 scripts/install.sh。"
+end sessionPickerCommand
 
 on switchToolCommand()
 	set installedTool to (POSIX path of (path to home folder)) & ".local/bin/codex-switch"

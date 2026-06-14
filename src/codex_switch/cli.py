@@ -12,6 +12,8 @@ import shutil
 import stat
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +21,10 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
+VERSION = "0.1.0"
+RELEASES_URL = "https://github.com/kuangre123/codex-switch/releases/latest"
+LATEST_RELEASE_API = "https://api.github.com/repos/kuangre123/codex-switch/releases/latest"
+LATEST_RELEASE_TAG_RE = re.compile(r"/releases/tag/v?([0-9][0-9A-Za-z.-]*)")
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 SESSION_SNAPSHOT_FILES = ("session_index.jsonl", ".codex-global-state.json")
 SESSION_DIRS = ("sessions", "archived_sessions")
@@ -39,6 +45,51 @@ def redacted_key(value: str | None) -> str:
     if len(value) <= 8:
         return "***"
     return f"{value[:3]}...{value[-4:]}"
+
+
+def version_tuple(value: str) -> tuple[int, ...]:
+    numbers = re.findall(r"\d+", value)
+    if not numbers:
+        return (0,)
+    parts = tuple(int(part) for part in numbers[:4])
+    return parts + (0,) * (4 - len(parts))
+
+
+def is_newer_version(latest: str, current: str) -> bool:
+    return version_tuple(latest) > version_tuple(current)
+
+
+def fetch_latest_release() -> dict[str, object]:
+    redirect_request = urllib.request.Request(
+        RELEASES_URL,
+        headers={"User-Agent": f"codex-switch/{VERSION}"},
+        method="HEAD",
+    )
+    try:
+        with urllib.request.urlopen(redirect_request, timeout=8) as response:
+            final_url = response.geturl()
+        match = LATEST_RELEASE_TAG_RE.search(final_url)
+        if match:
+            latest = match.group(1)
+            return {"tag_name": f"v{latest}", "html_url": final_url}
+    except (OSError, urllib.error.URLError):
+        pass
+
+    request = urllib.request.Request(
+        LATEST_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"codex-switch/{VERSION}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise SwitchError(f"Unable to check updates: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SwitchError("Unable to check updates: unexpected GitHub response")
+    return data
 
 
 def load_auth(auth_path: Path) -> dict[str, object]:
@@ -770,6 +821,29 @@ def sessions_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+def version(_: argparse.Namespace) -> int:
+    print(VERSION)
+    return 0
+
+
+def update_check(_: argparse.Namespace) -> int:
+    release = fetch_latest_release()
+    latest_tag = release.get("tag_name")
+    latest = latest_tag.strip().lstrip("v") if isinstance(latest_tag, str) else ""
+    release_url = release.get("html_url")
+    if not isinstance(release_url, str) or not release_url.strip():
+        release_url = RELEASES_URL
+    if not latest:
+        raise SwitchError("Unable to check updates: latest release has no tag_name")
+
+    update_available = is_newer_version(latest, VERSION)
+    print(f"current_version: {VERSION}")
+    print(f"latest_version: {latest}")
+    print(f"update_available: {'yes' if update_available else 'no'}")
+    print(f"release_url: {release_url}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-switch",
@@ -794,6 +868,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show current Codex switch-relevant state.")
     status_parser.set_defaults(func=status)
+
+    version_parser = subparsers.add_parser("version", help="Show Codex Switch version.")
+    version_parser.set_defaults(func=version)
 
     status_zh_parser = subparsers.add_parser("status-zh", help="Show current Codex state in Chinese for the app UI.")
     status_zh_parser.set_defaults(func=status_zh)
@@ -830,6 +907,11 @@ def build_parser() -> argparse.ArgumentParser:
     sessions_promote_parser = sessions_subparsers.add_parser("promote", help="Move selected sessions to the recent end.")
     sessions_promote_parser.add_argument("--id", action="append", required=True, help="Session id to promote. Can be repeated.")
     sessions_promote_parser.set_defaults(func=sessions_promote)
+
+    update_parser = subparsers.add_parser("update", help="Check for Codex Switch updates.")
+    update_subparsers = update_parser.add_subparsers(dest="update_command", required=True)
+    update_check_parser = update_subparsers.add_parser("check", help="Check GitHub Releases for a newer version.")
+    update_check_parser.set_defaults(func=update_check)
 
     return parser
 
