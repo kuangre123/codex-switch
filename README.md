@@ -4,9 +4,14 @@
 
 Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It can switch providers and keep the same Codex thread context, so you can continue the current conversation after moving between Official OpenAI and a custom API. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and preserves your official ChatGPT login while routing custom model calls through a relay API key.
 
-中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。切换后会尽量保留当前对话上下文，让你继续原来的 Codex 会话。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
+Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。切换后会尽量保留当前对话上下文，让你继续原来的 Codex 会话。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
 
-## Download App
+它的核心特性是：切换官方 OpenAI / 自定义 API 后，当前 Codex thread 和上下文历史会尽量保留，你可以继续原来的对话，不用重新开一个会话。
+
+官方 OpenAI 模式：使用 ChatGPT/OpenAI 登录，provider 是 openai。
+自定义 API 模式：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 custom。
+
+## Download App 下载 app：
 
 Download the latest macOS app from [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest):
 
