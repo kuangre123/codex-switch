@@ -15,10 +15,10 @@ end run
 on openSwitcher()
 	set targetMode to button returned of (display dialog "Choose a Codex mode" buttons {"Cancel", "Local custom", "Official OpenAI"} default button "Official OpenAI" cancel button "Cancel" with title "Codex Switch")
 	if targetMode is "Local custom" then
-		set resultText to my runSwitch("local") & return & return & "Restart Codex App so the UI refreshes to custom."
+		set resultText to my runSwitch("local --migrate-latest --restart-codex")
 		display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch"
 	else if targetMode is "Official OpenAI" then
-		set resultText to my runSwitch("official") & return & return & "Restart Codex App and sign in again if needed."
+		set resultText to my runSwitch("official --migrate-latest --restart-codex")
 		display dialog resultText buttons {"OK"} default button "OK" with title "Codex Switch"
 	end if
 end openSwitcher

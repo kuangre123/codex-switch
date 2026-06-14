@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -51,12 +52,71 @@ def write_local_config(home: Path) -> None:
     text = (home / "config.toml").read_text(encoding="utf-8")
     text = text.replace('model_provider = "openai"', 'model_provider = "custom"', 1)
     text = text.replace('model = "gpt-5"', 'model = "gpt-5.5"', 1)
-    text = text.replace('preferred_auth_method = "chatgpt"', 'preferred_auth_method = "apikey"', 1)
+    text = text.replace('wire_api = "chat"', 'wire_api = "responses"\nexperimental_bearer_token = "sk-test-secret"', 1)
     (home / "config.toml").write_text(text, encoding="utf-8")
 
 
 def read_state(home: Path) -> dict:
     return json.loads((home / "codex-switch-state.json").read_text(encoding="utf-8"))
+
+
+def write_thread_database(home: Path) -> None:
+    database = home / "sqlite" / "state_5.sqlite"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL,
+                cwd TEXT,
+                updated_at INTEGER NOT NULL,
+                updated_at_ms INTEGER,
+                has_user_event INTEGER NOT NULL,
+                archived INTEGER NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("older-official", "openai", None, 10, 10000, 0, 0),
+                ("current-custom", "custom", None, 20, 20000, 0, 0),
+                ("latest-official", "openai", None, 30, 30000, 0, 0),
+                ("archived-official", "openai", None, 40, 40000, 0, 1),
+            ],
+        )
+
+
+def write_rollout(home: Path, thread_id: str, provider: str, user_event: bool = False) -> Path:
+    path = home / "sessions" / "2026" / "06" / "15" / f"rollout-test-{thread_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-15T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/example", "model_provider": provider},
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if user_event:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-15T00:00:01Z",
+                        "type": "user_message",
+                        "payload": {"text": "hello"},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    return path
 
 
 class CodexSwitchTests(unittest.TestCase):
@@ -84,15 +144,16 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertNotIn("sk-test-secret", result.stdout)
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test-secret"},
+                {"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"},
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "custom"', config)
             self.assertIn('model = "gpt-5.5"', config)
-            self.assertIn('preferred_auth_method = "apikey"', config)
+            self.assertIn('preferred_auth_method = "chatgpt"', config)
             self.assertIn('base_url = "http://127.0.0.1:15721/v1"', config)
             self.assertIn('requires_openai_auth = true', config)
             self.assertIn('wire_api = "responses"', config)
+            self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
             self.assertIn('[projects."/Users/sirchen/Documents/aimashi"]', config)
             self.assertTrue((home / "backups").is_dir())
             self.assertTrue(any(p.name.startswith("config.toml.") for p in (home / "backups").iterdir()))
@@ -112,13 +173,14 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "chatgpt", "OPENAI_API_KEY": None},
+                {"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"},
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "openai"', config)
             self.assertIn('model = "gpt-5.5"', config)
             self.assertIn('preferred_auth_method = "chatgpt"', config)
             self.assertIn('base_url = "http://127.0.0.1:9999/v1"', config)
+            self.assertNotIn("experimental_bearer_token", config)
             self.assertNotIn("sk-test-secret", result.stdout)
             self.assertEqual(read_state(home)["local_api_key"], "sk-test-secret")
 
@@ -144,12 +206,112 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-cached-secret"},
+                {"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-cached-secret"},
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "http://127.0.0.1:18888/v1"', config)
             self.assertIn('model = "local-model"', config)
+            self.assertIn('experimental_bearer_token = "sk-cached-secret"', config)
             self.assertNotIn("sk-cached-secret", result.stdout)
+
+    def test_local_switch_preserves_existing_chatgpt_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({
+                    "auth_mode": "apikey",
+                    "OPENAI_API_KEY": None,
+                    "tokens": {
+                        "access_token": "current-access",
+                        "refresh_token": "current-refresh",
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--api-key", "sk-test-secret")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads((home / "auth.json").read_text(encoding="utf-8")),
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": "sk-test-secret",
+                    "tokens": {
+                        "access_token": "current-access",
+                        "refresh_token": "current-refresh",
+                    },
+                },
+            )
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
+
+    def test_local_switch_provider_syncs_existing_thread_to_custom_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            write_thread_database(home)
+            rollout = write_rollout(home, "latest-official", "openai", user_event=True)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--migrate-latest", "--no-open")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Provider-synced existing thread context to custom.", result.stdout)
+            meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(meta["payload"]["model_provider"], "custom")
+            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+                cwd, has_user_event = connection.execute(
+                    "SELECT cwd, has_user_event FROM threads WHERE id = 'latest-official'"
+                ).fetchone()
+            self.assertEqual(providers, {"custom"})
+            self.assertEqual(cwd, "/tmp/example")
+            self.assertEqual(has_user_event, 1)
+
+    def test_local_switch_provider_syncs_all_threads_when_latest_is_custom(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            write_thread_database(home)
+            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+                connection.execute(
+                    "UPDATE threads SET updated_at_ms = 50000 WHERE id = 'current-custom'"
+                )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--migrate-latest", "--no-open")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Provider-synced existing thread context to custom.", result.stdout)
+
+    def test_official_switch_provider_syncs_existing_thread_to_openai(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)
+            write_thread_database(home)
+            rollout = write_rollout(home, "current-custom", "custom")
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "official", "--migrate-latest", "--no-open")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Provider-synced existing thread context to openai.", result.stdout)
+            meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(meta["payload"]["model_provider"], "openai")
+            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+            self.assertEqual(providers, {"openai"})
 
     def test_local_switch_uses_public_default_api_address(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -170,7 +332,7 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "https://jp.icodeeasy.cc"', config)
 
-    def test_official_switch_does_not_restore_cached_oauth_tokens(self) -> None:
+    def test_official_switch_preserves_existing_oauth_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -188,7 +350,14 @@ class CodexSwitchTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (home / "auth.json").write_text(
-                json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test-secret"}),
+                json.dumps({
+                    "auth_mode": "apikey",
+                    "OPENAI_API_KEY": "sk-test-secret",
+                    "tokens": {
+                        "access_token": "current-access",
+                        "refresh_token": "current-refresh",
+                    },
+                }),
                 encoding="utf-8",
             )
 
@@ -197,7 +366,14 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "chatgpt", "OPENAI_API_KEY": None},
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": "sk-test-secret",
+                    "tokens": {
+                        "access_token": "current-access",
+                        "refresh_token": "current-refresh",
+                    },
+                },
             )
             self.assertNotIn("official_auth", read_state(home))
 
@@ -288,6 +464,20 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model = "gpt-cached-official"', config)
+
+    def test_restart_codex_flag_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "official", "--migrate-latest")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Restarted Codex.app", result.stdout)
 
 
 if __name__ == "__main__":

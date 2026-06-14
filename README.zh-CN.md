@@ -70,7 +70,26 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 ~/.codex/backups/
 ```
 
-官方模式不会恢复旧 OAuth token，因为 refresh token 可能是一次性轮换的，恢复旧 token 会导致登录刷新失败。
+切换时会保留现有 `auth.json` 里的官方 ChatGPT 登录态。自定义 API Key 会写入 custom provider 的 `experimental_bearer_token`，这样自定义 API 可以用，同时官方登录不会被清掉。
+
+通过 macOS App 切换时，工具会先做 Provider Sync：原地更新已有会话 rollout 和 Codex Desktop sqlite 里的 `model_provider`，所以当前 thread id 和上下文历史都会保留，不需要分叉到新会话。随后 App 会自动优雅重启 Codex，让正在运行的 Codex Desktop 重新加载新的 provider。
+
+如果只用命令行，也可以手动同步已有会话元数据：
+
+```bash
+codex-switch local --migrate-latest
+codex-switch official --migrate-latest
+```
+
+Provider Sync 会额外触碰这些 Codex Desktop 会话元数据：
+
+```text
+~/.codex/sessions/**/rollout-*.jsonl
+~/.codex/archived_sessions/**/rollout-*.jsonl
+~/.codex/sqlite/state_*.sqlite
+~/.codex/state_*.sqlite
+~/.codex/backups_state/provider-sync/
+```
 
 ## 开发
 

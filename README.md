@@ -2,9 +2,9 @@
 
 > One tiny macOS app for switching Codex between Official OpenAI login and a custom OpenAI-compatible API endpoint.
 
-Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and avoids storing stale OAuth refresh tokens.
+Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and preserves your official ChatGPT login while routing custom model calls through a relay API key.
 
-中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并避免恢复过期 OAuth refresh token。
+中文：Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
 
 ## Download App
 
@@ -36,7 +36,9 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
 - Automatic backups under `~/.codex/backups`.
-- No stale OAuth token restore. Official mode resets auth to ChatGPT mode and lets Codex perform a fresh login when needed.
+- Preserves existing ChatGPT login tokens while custom mode uses a provider-level bearer token.
+- Provider Sync updates existing Codex thread metadata in place, so the current conversation can continue on the selected provider without forking into a new thread.
+- The macOS app automatically restarts Codex after switching so the running desktop app reloads the selected provider.
 - No Python dependencies beyond the standard library.
 
 ## Install
@@ -87,7 +89,7 @@ The app has three actions:
 - **Status**: show current Codex auth/provider/model.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
-切换后建议重启 Codex App，让界面刷新到新的 provider/model。
+When switching from the macOS app, existing Codex thread metadata is provider-synced in place, then Codex.app is gracefully quit and reopened so the running session reloads the selected provider. The thread id and conversation history stay in place.
 
 ### CLI
 
@@ -118,6 +120,15 @@ Prompt for and save an API key:
 codex-switch local-login
 ```
 
+Sync existing thread metadata without using the app:
+
+```bash
+codex-switch local --migrate-latest
+codex-switch official --migrate-latest
+```
+
+The macOS app also passes `--restart-codex` so Codex Desktop reloads the selected provider immediately after Provider Sync.
+
 ## What It Changes
 
 Codex Switch edits only the user Codex files:
@@ -128,41 +139,45 @@ Codex Switch edits only the user Codex files:
 ~/.codex/codex-switch-state.json
 ```
 
+When Provider Sync is enabled by the app or `--migrate-latest`, it also updates existing Codex Desktop thread metadata:
+
+```text
+~/.codex/sessions/**/rollout-*.jsonl
+~/.codex/archived_sessions/**/rollout-*.jsonl
+~/.codex/sqlite/state_*.sqlite
+~/.codex/state_*.sqlite
+```
+
+This is what keeps the current conversation context attached to the newly selected provider.
+
 Backups are written before every switch:
 
 ```text
 ~/.codex/backups/
+~/.codex/backups_state/provider-sync/
 ```
 
-Custom mode writes:
+Custom mode writes the custom API key into the custom provider, while keeping ChatGPT as the preferred auth method:
 
 ```toml
 model_provider = "custom"
-preferred_auth_method = "apikey"
+preferred_auth_method = "chatgpt"
 
 [model_providers.custom]
 base_url = "https://jp.icodeeasy.cc"
 requires_openai_auth = true
 wire_api = "responses"
+experimental_bearer_token = "sk-..."
 ```
 
-Official mode writes:
+Official mode switches back to the official provider and removes the custom provider bearer token:
 
 ```toml
 model_provider = "openai"
 preferred_auth_method = "chatgpt"
 ```
 
-and resets `auth.json` to:
-
-```json
-{
-  "auth_mode": "chatgpt",
-  "OPENAI_API_KEY": null
-}
-```
-
-This intentionally does not restore old OAuth tokens, because refresh tokens can be single-use and restoring them can break login.
+`auth.json` is preserved, so existing ChatGPT login tokens are not discarded.
 
 ## Development
 
@@ -196,11 +211,11 @@ This removes the installed CLI and app, but does not delete your `~/.codex` sett
 
 **Why does official mode ask me to log in again?**
 
-Because Codex Switch does not restore old OAuth refresh tokens. That is deliberate. A stale refresh token can cause errors like “refresh token was already used.”
+It should not ask you to log in again if your current `auth.json` already contains a valid ChatGPT login. Codex Switch preserves that file instead of replacing it with an empty login stub.
 
 **Does this expose my API key?**
 
-The CLI status output redacts API keys. The key is stored in `~/.codex/auth.json`, same as Codex API-key login.
+The CLI status output redacts API keys. Custom mode also writes the key as `experimental_bearer_token` under the custom provider so Codex can keep using ChatGPT login for official account features.
 
 **Can I use a remote OpenAI-compatible endpoint instead of localhost?**
 

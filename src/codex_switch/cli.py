@@ -9,10 +9,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -24,6 +28,14 @@ CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 
 class SwitchError(RuntimeError):
     pass
+
+
+@dataclass
+class RolloutSyncInfo:
+    changed: bool = False
+    thread_id: str | None = None
+    cwd: str | None = None
+    has_user_event: bool = False
 
 
 def codex_home() -> Path:
@@ -111,12 +123,8 @@ def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
             tmp_path.unlink()
 
 
-def write_auth(auth_path: Path, auth_mode: str, api_key: str | None) -> None:
-    atomic_write(
-        auth_path,
-        json.dumps({"auth_mode": auth_mode, "OPENAI_API_KEY": api_key}, indent=2) + "\n",
-        0o600,
-    )
+def write_auth(auth_path: Path, auth: dict[str, object]) -> None:
+    atomic_write(auth_path, json.dumps(auth, indent=2, sort_keys=True) + "\n", 0o600)
 
 
 def split_toml_sections(content: str) -> list[tuple[str, list[str]]]:
@@ -163,7 +171,12 @@ def set_bool_key(lines: list[str], key: str, value: bool) -> list[str]:
     return lines
 
 
-def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str) -> list[tuple[str, list[str]]]:
+def remove_key(lines: list[str], key: str) -> list[str]:
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    return [line for line in lines if not pattern.match(line)]
+
+
+def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str, api_key: str) -> list[tuple[str, list[str]]]:
     updated: list[tuple[str, list[str]]] = []
     found = False
     for section, lines in sections:
@@ -173,6 +186,7 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str)
             lines = set_key(lines, "name", "custom")
             lines = set_bool_key(lines, "requires_openai_auth", True)
             lines = set_key(lines, "wire_api", "responses")
+            lines = set_key(lines, "experimental_bearer_token", api_key)
         updated.append((section, lines))
     if not found:
         lines = [
@@ -182,21 +196,22 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str)
             'name = "custom"\n',
             "requires_openai_auth = true\n",
             'wire_api = "responses"\n',
+            f'experimental_bearer_token = "{api_key}"\n',
         ]
         updated.append(("[model_providers.custom]", lines))
     return updated
 
 
-def rewrite_config_for_local(content: str, base_url: str, model: str) -> str:
+def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
     for section, lines in sections:
         if section == "":
             lines = set_key(lines, "model_provider", "custom")
             lines = set_key(lines, "model", model)
-            lines = set_key(lines, "preferred_auth_method", "apikey")
+            lines = set_key(lines, "preferred_auth_method", "chatgpt")
         rewritten.append((section, lines))
-    rewritten = ensure_custom_provider(rewritten, base_url)
+    rewritten = ensure_custom_provider(rewritten, base_url, api_key)
     return "".join(line for _, lines in rewritten for line in lines)
 
 
@@ -208,6 +223,8 @@ def rewrite_config_for_official(content: str, model: str) -> str:
             lines = set_key(lines, "model_provider", "openai")
             lines = set_key(lines, "model", model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
+        elif section == "[model_providers.custom]":
+            lines = remove_key(lines, "experimental_bearer_token")
         rewritten.append((section, lines))
     return "".join(line for _, lines in rewritten for line in lines)
 
@@ -216,6 +233,135 @@ def read_config(config_path: Path) -> str:
     if not config_path.exists():
         return ""
     return config_path.read_text(encoding="utf-8")
+
+
+def rollout_files(home: Path) -> list[Path]:
+    roots = [home / "sessions", home / "archived_sessions"]
+    files: list[Path] = []
+    for root in roots:
+        if root.exists():
+            files.extend(root.rglob("rollout-*.jsonl"))
+    return sorted(files)
+
+
+def rewrite_rollout_provider(path: Path, provider: str) -> RolloutSyncInfo:
+    info = RolloutSyncInfo()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return info
+    info.has_user_event = '\"user_message\"' in text or '\"user_input\"' in text
+    output: list[str] = []
+    for segment in text.splitlines(keepends=True):
+        line = segment[:-1] if segment.endswith("\n") else segment
+        ending = "\n" if segment.endswith("\n") else ""
+        if line.endswith("\r"):
+            line = line[:-1]
+            ending = "\r\n"
+        next_line = line
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            output.append(segment)
+            continue
+        if record.get("type") == "session_meta" and isinstance(record.get("payload"), dict):
+            payload = record["payload"]
+            if info.thread_id is None and isinstance(payload.get("id"), str):
+                info.thread_id = payload["id"]
+            if info.cwd is None and isinstance(payload.get("cwd"), str):
+                info.cwd = payload["cwd"]
+            if payload.get("model_provider") != provider:
+                payload["model_provider"] = provider
+                next_line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                info.changed = True
+        output.append(next_line + ending)
+    if info.changed:
+        original_stat = path.stat()
+        atomic_write(path, "".join(output), stat.S_IMODE(original_stat.st_mode) or 0o600)
+        os.utime(path, (original_stat.st_atime, original_stat.st_mtime))
+    return info
+
+
+def provider_sync_backup(home: Path) -> Path:
+    backup_dir = home / "backups_state" / "provider-sync" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("config.toml", ".codex-global-state.json"):
+        source = home / name
+        if source.exists():
+            shutil.copy2(source, backup_dir / name)
+    return backup_dir
+
+
+def sqlite_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncInfo]) -> int:
+    databases = list((home / "sqlite").glob("state_*.sqlite"))
+    databases.extend(home.glob("state_*.sqlite"))
+    updated = 0
+    user_event_thread_ids = {info.thread_id for info in rollouts if info.thread_id and info.has_user_event}
+    cwd_by_thread_id = {info.thread_id: info.cwd for info in rollouts if info.thread_id and info.cwd}
+    for database in databases:
+        try:
+            with sqlite3.connect(database) as connection:
+                columns = sqlite_columns(connection, "threads")
+                if "model_provider" not in columns:
+                    continue
+                cursor = connection.execute(
+                    "UPDATE threads SET model_provider = ? WHERE COALESCE(model_provider, '') <> ?",
+                    (provider, provider),
+                )
+                updated += cursor.rowcount if cursor.rowcount is not None else 0
+                if "has_user_event" in columns:
+                    for thread_id in user_event_thread_ids:
+                        cursor = connection.execute(
+                            "UPDATE threads SET has_user_event = 1 WHERE id = ? AND COALESCE(has_user_event, 0) <> 1",
+                            (thread_id,),
+                        )
+                        updated += cursor.rowcount if cursor.rowcount is not None else 0
+                if "cwd" in columns:
+                    for thread_id, cwd in cwd_by_thread_id.items():
+                        cursor = connection.execute(
+                            "UPDATE threads SET cwd = ? WHERE id = ? AND COALESCE(cwd, '') <> ?",
+                            (cwd, thread_id, cwd),
+                        )
+                        updated += cursor.rowcount if cursor.rowcount is not None else 0
+        except sqlite3.Error as exc:
+            raise SwitchError(f"Could not sync thread provider in {database}: {exc}") from exc
+    return updated
+
+
+def sync_provider_metadata(home: Path, provider: str) -> tuple[int, int, Path]:
+    backup_dir = provider_sync_backup(home)
+    rollouts = [rewrite_rollout_provider(path, provider) for path in rollout_files(home)]
+    changed_rollouts = sum(1 for info in rollouts if info.changed)
+    sqlite_rows = sync_sqlite_provider(home, provider, rollouts)
+    return changed_rollouts, sqlite_rows, backup_dir
+
+
+def print_migration(home: Path, provider: str, _model: str, args: argparse.Namespace) -> None:
+    if not getattr(args, "migrate_latest", False):
+        return
+    changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, provider)
+    print(f"Provider-synced existing thread context to {provider}.")
+    print(f"changed_session_files: {changed_rollouts}")
+    print(f"sqlite_rows_updated: {sqlite_rows}")
+    print(f"provider_sync_backup: {backup_dir}")
+
+
+def restart_codex(args: argparse.Namespace) -> None:
+    if not getattr(args, "restart_codex", False):
+        return
+    subprocess.run(
+        ["osascript", "-e", 'tell application "Codex" to quit'],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1.5)
+    subprocess.run(["open", "-a", "Codex"], check=True)
+    print("Restarted Codex.app to reload the selected provider.")
 
 
 def switch_local(args: argparse.Namespace) -> int:
@@ -240,8 +386,10 @@ def switch_local(args: argparse.Namespace) -> int:
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     save_state(home, state)
-    write_auth(auth_path, "apikey", api_key)
-    config = rewrite_config_for_local(read_config(config_path), base_url, model)
+    auth["OPENAI_API_KEY"] = api_key
+    auth["auth_mode"] = "chatgpt"
+    write_auth(auth_path, auth)
+    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key)
     atomic_write(config_path, config, 0o600)
 
     print("Switched Codex to local relay API mode.")
@@ -250,6 +398,8 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"model: {model}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
+    print_migration(home, "custom", model, args)
+    restart_codex(args)
     return 0
 
 
@@ -263,12 +413,12 @@ def switch_official(args: argparse.Namespace) -> int:
     state = load_state(home)
     remember_current_auth(home, auth, state)
     model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
-    official_auth = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None}
+    auth["auth_mode"] = "chatgpt"
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     save_state(home, state)
-    atomic_write(auth_path, json.dumps(official_auth, indent=2, sort_keys=True) + "\n", 0o600)
+    write_auth(auth_path, auth)
     config = rewrite_config_for_official(read_config(config_path), model)
     atomic_write(config_path, config, 0o600)
 
@@ -278,7 +428,9 @@ def switch_official(args: argparse.Namespace) -> int:
     print("model_provider: openai")
     print(f"model: {model}")
     print(f"backup_dir: {backup_dir}")
-    print("If Codex asks you to sign in, run: codex login")
+    print("Existing ChatGPT login tokens and custom API key were preserved.")
+    print_migration(home, "openai", model, args)
+    restart_codex(args)
     return 0
 
 
@@ -352,6 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--api-key", help="API key to store in auth.json. Omit to reuse existing key.")
     local.add_argument("--base-url", help=f"Local relay API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
     local.add_argument("--model", help=f"Model name. Default: saved setting or {DEFAULT_MODEL}")
+    local.add_argument("--migrate-latest", action="store_true", help="Sync existing thread metadata to this provider.")
+    local.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after switching.")
+    local.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
     local.set_defaults(func=switch_local)
 
     local_login = subparsers.add_parser("local-login", help="Prompt for an API key, then switch to local relay API mode.")
@@ -361,6 +516,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     official = subparsers.add_parser("official", help="Use official ChatGPT login mode.")
     official.add_argument("--model", help=f"Official Codex model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
+    official.add_argument("--migrate-latest", action="store_true", help="Sync existing thread metadata to this provider.")
+    official.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after switching.")
+    official.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
     official.set_defaults(func=switch_official)
 
     status_parser = subparsers.add_parser("status", help="Show current Codex switch-relevant state.")
