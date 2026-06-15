@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SwiftUI
 
 enum AppLanguage: String, CaseIterable, Identifiable {
@@ -28,6 +29,40 @@ struct CommandResult {
     let output: String
 }
 
+enum UpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate
+    case available(version: String)
+    case failed
+}
+
+private enum VersionComparator {
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        let candidateParts = numericParts(candidate)
+        let currentParts = numericParts(current)
+        let count = max(candidateParts.count, currentParts.count)
+
+        for index in 0..<count {
+            let candidateValue = index < candidateParts.count ? candidateParts[index] : 0
+            let currentValue = index < currentParts.count ? currentParts[index] : 0
+            if candidateValue != currentValue {
+                return candidateValue > currentValue
+            }
+        }
+        return false
+    }
+
+    private static func numericParts(_ version: String) -> [Int] {
+        version
+            .trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            .split(separator: ".")
+            .map { component in
+                Int(component.prefix(while: { $0.isNumber })) ?? 0
+            }
+    }
+}
+
 final class SwitchViewModel: ObservableObject {
     @Published var statusValues: [String: String] = [:]
     @Published var localBaseURL = ""
@@ -38,12 +73,19 @@ final class SwitchViewModel: ObservableObject {
     @Published var switchSucceeded = false
     @Published var switchFailed = false
     @Published var completedMode = ProviderMode.custom
+    @Published var updateState = UpdateState.idle
+    @Published var releaseURL = URL(string: "https://github.com/kuangre123/codex-switch/releases/latest")!
+
+    var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
 
     private var cliPath: String {
         NSString(string: "~/.local/bin/codex-switch").expandingTildeInPath
     }
 
     func load() {
+        checkForUpdates()
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -60,6 +102,51 @@ final class SwitchViewModel: ObservableObject {
                 }
                 self.isBusy = false
             }
+        }
+    }
+
+    func checkForUpdates() {
+        guard updateState != .checking else { return }
+        updateState = .checking
+
+        let endpoint = URL(string: "https://github.com/kuangre123/codex-switch/releases/latest")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Codex-Switch/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            guard let self else { return }
+            guard error == nil,
+                  let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let releaseURL = httpResponse.url,
+                  releaseURL.path.contains("/releases/tag/") else {
+                DispatchQueue.main.async {
+                    self.updateState = .failed
+                }
+                return
+            }
+
+            let version = releaseURL.lastPathComponent.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            DispatchQueue.main.async {
+                self.releaseURL = releaseURL
+                self.updateState = VersionComparator.isNewer(version, than: self.currentVersion)
+                    ? .available(version: version)
+                    : .upToDate
+            }
+        }.resume()
+    }
+
+    func performUpdateAction() {
+        switch updateState {
+        case .available:
+            NSWorkspace.shared.open(releaseURL)
+        case .checking:
+            break
+        case .idle, .upToDate, .failed:
+            checkForUpdates()
         }
     }
 
@@ -163,10 +250,15 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/kuangre123/codex-switch/releases/latest")!)
+                    model.performUpdateAction()
                 } label: {
-                    Label(texts.text("升级", "Upgrade"), systemImage: "arrow.up.circle")
+                    HStack(spacing: 6) {
+                        Image(systemName: updateButtonIcon)
+                        Text(updateButtonTitle)
+                    }
                 }
+                .disabled(model.updateState == .checking)
+                .help(updateButtonHelp)
             }
         }
         .overlay {
@@ -315,6 +407,49 @@ struct ContentView: View {
         return model.completedMode == .custom
             ? texts.text("已切换到自定义 API，并已重启 Codex 让设置生效。", "Switched to the custom API and restarted Codex to apply it.")
             : texts.text("已切换到官方 OpenAI，并已重启 Codex 让设置生效。", "Switched to Official OpenAI and restarted Codex to apply it.")
+    }
+
+    private var updateButtonTitle: String {
+        switch model.updateState {
+        case .idle:
+            return texts.text("检查更新", "Check Updates")
+        case .checking:
+            return texts.text("检查中…", "Checking…")
+        case .upToDate:
+            return texts.text("已是最新版", "Up to Date")
+        case let .available(version):
+            return texts.text("发现 v\(version)", "Update v\(version)")
+        case .failed:
+            return texts.text("重试检查", "Retry Check")
+        }
+    }
+
+    private var updateButtonIcon: String {
+        switch model.updateState {
+        case .idle:
+            return "arrow.clockwise.circle"
+        case .checking:
+            return "arrow.triangle.2.circlepath"
+        case .upToDate:
+            return "checkmark.circle"
+        case .available:
+            return "arrow.down.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle"
+        }
+    }
+
+    private var updateButtonHelp: String {
+        switch model.updateState {
+        case .available:
+            return texts.text("打开 GitHub 下载新版本", "Open GitHub to download the update")
+        case .upToDate:
+            return texts.text("当前版本 v\(model.currentVersion)，点击重新检查", "Current version v\(model.currentVersion). Click to check again.")
+        case .failed:
+            return texts.text("检查失败，点击重试", "Update check failed. Click to retry.")
+        default:
+            return texts.text("当前版本 v\(model.currentVersion)", "Current version v\(model.currentVersion)")
+        }
     }
 
     private func statusRow(_ label: String, _ value: String) -> some View {

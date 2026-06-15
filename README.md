@@ -45,6 +45,7 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 - Preserves existing ChatGPT login tokens while custom mode uses a provider-level bearer token.
 - Provider Sync updates existing Codex thread metadata in place, so the current conversation can continue on the selected provider without forking into a new thread.
 - The macOS app automatically restarts Codex after switching so the running desktop app reloads the selected provider.
+- The toolbar automatically checks GitHub Releases and shows whether an update is available.
 - No Python dependencies beyond the standard library.
 
 ## Install

@@ -56,6 +56,8 @@ codex-switch official
 
 通过 App 切换模式时，会自动同步当前会话上下文并重启 Codex，让你回到同一条对话里继续使用新的 provider。
 
+App 启动后会自动检查 GitHub Releases，右上角会显示“已是最新版”或可用的新版本号。
+
 修改默认 API 地址：
 
 ```bash
