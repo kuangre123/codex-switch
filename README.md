@@ -48,6 +48,8 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 - The toolbar automatically checks GitHub Releases and shows whether an update is available.
 - Official OpenAI mode hides custom API fields while keeping saved custom settings for later.
 - Official model can be selected from a preset menu or typed manually.
+- Custom API keys can be replaced from the app using a secure field; leave it blank to keep the saved key.
+- The app bundles its matching CLI, so app and command behavior stay in sync after updates.
 - No Python dependencies beyond the standard library.
 
 ## Install

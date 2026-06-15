@@ -406,7 +406,12 @@ def switch_local(args: argparse.Namespace) -> int:
     base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
     model = args.model or effective_setting(state, "local_model", DEFAULT_MODEL)
     cached_key = state.get("local_api_key")
-    api_key = args.api_key or str(auth.get("OPENAI_API_KEY") or "").strip()
+    stdin_key = ""
+    if getattr(args, "api_key_stdin", False):
+        stdin_key = sys.stdin.readline().strip()
+        if not stdin_key:
+            raise SwitchError("API key from stdin was empty.")
+    api_key = stdin_key or args.api_key or str(auth.get("OPENAI_API_KEY") or "").strip()
     if not api_key and isinstance(cached_key, str):
         api_key = cached_key.strip()
     if not api_key:
@@ -531,7 +536,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     local = subparsers.add_parser("local", help="Use local relay API mode.")
-    local.add_argument("--api-key", help="API key to store in auth.json. Omit to reuse existing key.")
+    key_source = local.add_mutually_exclusive_group()
+    key_source.add_argument("--api-key", help="API key to store in auth.json. Omit to reuse existing key.")
+    key_source.add_argument("--api-key-stdin", action="store_true", help="Read a replacement API key from stdin.")
     local.add_argument("--base-url", help=f"Local relay API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
     local.add_argument("--model", help=f"Model name. Default: saved setting or {DEFAULT_MODEL}")
     local.add_argument("--migrate-latest", action="store_true", help="Sync existing thread metadata to this provider.")

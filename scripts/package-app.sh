@@ -29,6 +29,8 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$APP_DIR"
 cp "$ROOT_DIR/app/Info.plist" "$BUILD_APP/Contents/Info.plist"
 cp "$ROOT_DIR/assets/app-icon.icns" "$BUILD_APP/Contents/Resources/app-icon.icns"
+cp "$ROOT_DIR/src/codex_switch/cli.py" "$BUILD_APP/Contents/Resources/codex-switch"
+chmod 755 "$BUILD_APP/Contents/Resources/codex-switch"
 CLANG_MODULE_CACHE_PATH="$BUILD_DIR/clang-cache" \
 SWIFT_MODULECACHE_PATH="$BUILD_DIR/swift-cache" \
 "$SWIFTC" \

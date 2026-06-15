@@ -19,13 +19,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from codex_switch import cli as cli_module
 
 
-def run_tool(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_tool(home: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CODEX_HOME"] = str(home)
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         env=env,
         text=True,
+        input=input_text,
         capture_output=True,
         check=False,
     )
@@ -220,6 +221,43 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model = "local-model"', config)
             self.assertIn('experimental_bearer_token = "sk-cached-secret"', config)
             self.assertNotIn("sk-cached-secret", result.stdout)
+
+    def test_local_switch_can_replace_api_key_from_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-old-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--api-key-stdin", input_text="sk-new-secret\n")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("sk-new-secret", result.stdout)
+            self.assertEqual(
+                json.loads((home / "auth.json").read_text(encoding="utf-8"))["OPENAI_API_KEY"],
+                "sk-new-secret",
+            )
+            self.assertEqual(read_state(home)["local_api_key"], "sk-new-secret")
+            self.assertIn(
+                'experimental_bearer_token = "sk-new-secret"',
+                (home / "config.toml").read_text(encoding="utf-8"),
+            )
+
+    def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-old-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "local", "--api-key-stdin", input_text="\n")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("stdin was empty", result.stderr)
 
     def test_local_switch_preserves_existing_chatgpt_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

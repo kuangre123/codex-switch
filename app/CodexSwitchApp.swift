@@ -67,6 +67,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var statusValues: [String: String] = [:]
     @Published var localBaseURL = ""
     @Published var localModel = ""
+    @Published var replacementAPIKey = ""
     @Published var officialModel = ""
     @Published var output = ""
     @Published var isBusy = false
@@ -81,7 +82,10 @@ final class SwitchViewModel: ObservableObject {
     }
 
     private var cliPath: String {
-        NSString(string: "~/.local/bin/codex-switch").expandingTildeInPath
+        if let bundled = Bundle.main.path(forResource: "codex-switch", ofType: nil) {
+            return bundled
+        }
+        return NSString(string: "~/.local/bin/codex-switch").expandingTildeInPath
     }
 
     func load() {
@@ -157,6 +161,7 @@ final class SwitchViewModel: ObservableObject {
         switchFailed = false
         let baseURL = localBaseURL
         let local = localModel
+        let replacementKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -175,7 +180,13 @@ final class SwitchViewModel: ObservableObject {
                 return
             }
             let command = mode == .custom ? "local" : "official"
-            let switched = self.run([command, "--migrate-latest", "--restart-codex"])
+            var switchArguments = [command, "--migrate-latest", "--restart-codex"]
+            var switchInput: String?
+            if mode == .custom && !replacementKey.isEmpty {
+                switchArguments.append("--api-key-stdin")
+                switchInput = replacementKey + "\n"
+            }
+            let switched = self.run(switchArguments, standardInput: switchInput)
             let status = self.run(["status"])
             DispatchQueue.main.async {
                 self.output = switched.output
@@ -183,6 +194,7 @@ final class SwitchViewModel: ObservableObject {
                 self.isBusy = false
                 self.completedMode = mode
                 if switched.status == 0 {
+                    self.replacementAPIKey = ""
                     self.switchSucceeded = true
                 } else {
                     self.switchFailed = true
@@ -191,7 +203,7 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
-    private func run(_ arguments: [String]) -> CommandResult {
+    private func run(_ arguments: [String], standardInput: String? = nil) -> CommandResult {
         guard FileManager.default.isExecutableFile(atPath: cliPath) else {
             return CommandResult(status: 127, output: "codex-switch CLI not found at \(cliPath)")
         }
@@ -201,8 +213,14 @@ final class SwitchViewModel: ObservableObject {
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
+        let inputPipe = standardInput == nil ? nil : Pipe()
+        process.standardInput = inputPipe
         do {
             try process.run()
+            if let standardInput, let inputPipe {
+                inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
+                inputPipe.fileHandleForWriting.closeFile()
+            }
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -319,22 +337,20 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                VStack(alignment: .leading, spacing: 12) {
                     if targetMode == .custom {
-                        GridRow {
-                            Text(texts.text("自定义 API 地址", "Custom API URL"))
-                                .frame(width: 130, alignment: .leading)
+                        settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
-                        GridRow {
-                            Text(texts.text("自定义模型", "Custom Model"))
-                                .frame(width: 130, alignment: .leading)
+                        settingRow(texts.text("自定义模型", "Custom Model")) {
                             TextField("gpt-5.5", text: $model.localModel)
                         }
+                        settingRow(texts.text("新 API Key", "New API Key")) {
+                            SecureField(apiKeyPlaceholder, text: $model.replacementAPIKey)
+                                .help(texts.text("留空继续使用现有 API Key", "Leave blank to keep the saved API key"))
+                        }
                     }
-                    GridRow {
-                        Text(texts.text("官方模型", "Official Model"))
-                            .frame(width: 130, alignment: .leading)
+                    settingRow(texts.text("官方模型", "Official Model")) {
                         HStack(spacing: 8) {
                             TextField("gpt-5.5", text: $model.officialModel)
                             Menu {
@@ -424,6 +440,22 @@ struct ContentView: View {
         return model.completedMode == .custom
             ? texts.text("已切换到自定义 API，并已重启 Codex 让设置生效。", "Switched to the custom API and restarted Codex to apply it.")
             : texts.text("已切换到官方 OpenAI，并已重启 Codex 让设置生效。", "Switched to Official OpenAI and restarted Codex to apply it.")
+    }
+
+    private var apiKeyPlaceholder: String {
+        let savedKey = model.statusValues["api_key"] ?? ""
+        if savedKey.isEmpty || savedKey == "(none)" || savedKey == "-" {
+            return texts.text("输入 API Key", "Enter API key")
+        }
+        return texts.text("留空沿用 \(savedKey)", "Leave blank to keep \(savedKey)")
+    }
+
+    private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 14) {
+            Text(label)
+                .frame(width: 130, alignment: .leading)
+            content()
+        }
     }
 
     private var updateButtonTitle: String {
