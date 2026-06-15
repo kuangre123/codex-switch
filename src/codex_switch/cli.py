@@ -23,6 +23,7 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
+RESTART_SETTLE_SECONDS = 3.0
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 
 
@@ -235,6 +236,17 @@ def read_config(config_path: Path) -> str:
     return config_path.read_text(encoding="utf-8")
 
 
+def configured_provider(content: str) -> str:
+    for section, lines in split_toml_sections(content):
+        if section != "":
+            continue
+        for line in lines:
+            match = re.match(r'^\s*model_provider\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    return "openai"
+
+
 def rollout_files(home: Path) -> list[Path]:
     roots = [home / "sessions", home / "archived_sessions"]
     files: list[Path] = []
@@ -304,7 +316,8 @@ def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncIn
     cwd_by_thread_id = {info.thread_id: info.cwd for info in rollouts if info.thread_id and info.cwd}
     for database in databases:
         try:
-            with sqlite3.connect(database) as connection:
+            connection = sqlite3.connect(database)
+            try:
                 columns = sqlite_columns(connection, "threads")
                 if "model_provider" not in columns:
                     continue
@@ -327,6 +340,9 @@ def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncIn
                             (cwd, thread_id, cwd),
                         )
                         updated += cursor.rowcount if cursor.rowcount is not None else 0
+                connection.commit()
+            finally:
+                connection.close()
         except sqlite3.Error as exc:
             raise SwitchError(f"Could not sync thread provider in {database}: {exc}") from exc
     return updated
@@ -350,7 +366,7 @@ def print_migration(home: Path, provider: str, _model: str, args: argparse.Names
     print(f"provider_sync_backup: {backup_dir}")
 
 
-def restart_codex(args: argparse.Namespace) -> None:
+def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str) -> None:
     if not getattr(args, "restart_codex", False):
         return
     subprocess.run(
@@ -361,6 +377,20 @@ def restart_codex(args: argparse.Namespace) -> None:
     )
     time.sleep(1.5)
     subprocess.run(["open", "-a", "Codex"], check=True)
+    time.sleep(RESTART_SETTLE_SECONDS)
+    actual_provider = configured_provider(read_config(home / "config.toml"))
+    if actual_provider != expected_provider:
+        repair_summary = ""
+        if getattr(args, "migrate_latest", False):
+            changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, actual_provider)
+            repair_summary = (
+                f" Restored thread metadata to {actual_provider} "
+                f"({changed_rollouts} session files, {sqlite_rows} database rows; backup: {backup_dir})."
+            )
+        raise SwitchError(
+            f"Codex restarted with provider {actual_provider}, not {expected_provider}."
+            f"{repair_summary}"
+        )
     print("Restarted Codex.app to reload the selected provider.")
 
 
@@ -399,7 +429,7 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
-    restart_codex(args)
+    restart_codex(args, home, "custom")
     return 0
 
 
@@ -430,7 +460,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print(f"backup_dir: {backup_dir}")
     print("Existing ChatGPT login tokens and custom API key were preserved.")
     print_migration(home, "openai", model, args)
-    restart_codex(args)
+    restart_codex(args, home, "openai")
     return 0
 
 

@@ -6,11 +6,17 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src" / "codex_switch" / "cli.py"
+sys.path.insert(0, str(ROOT / "src"))
+
+from codex_switch import cli as cli_module
 
 
 def run_tool(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -63,7 +69,7 @@ def read_state(home: Path) -> dict:
 def write_thread_database(home: Path) -> None:
     database = home / "sqlite" / "state_5.sqlite"
     database.parent.mkdir(parents=True)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.execute(
             """
             CREATE TABLE threads (
@@ -86,6 +92,7 @@ def write_thread_database(home: Path) -> None:
                 ("archived-official", "openai", None, 40, 40000, 0, 1),
             ],
         )
+        connection.commit()
 
 
 def write_rollout(home: Path, thread_id: str, provider: str, user_event: bool = False) -> Path:
@@ -264,7 +271,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("Provider-synced existing thread context to custom.", result.stdout)
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "custom")
-            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
                 cwd, has_user_event = connection.execute(
                     "SELECT cwd, has_user_event FROM threads WHERE id = 'latest-official'"
@@ -278,10 +285,11 @@ class CodexSwitchTests(unittest.TestCase):
             home = Path(temp) / ".codex"
             write_sample_config(home)
             write_thread_database(home)
-            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 connection.execute(
                     "UPDATE threads SET updated_at_ms = 50000 WHERE id = 'current-custom'"
                 )
+                connection.commit()
             (home / "auth.json").write_text(
                 json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
                 encoding="utf-8",
@@ -309,7 +317,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("Provider-synced existing thread context to openai.", result.stdout)
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "openai")
-            with sqlite3.connect(home / "sqlite" / "state_5.sqlite") as connection:
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
             self.assertEqual(providers, {"openai"})
 
@@ -478,6 +486,24 @@ class CodexSwitchTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Restarted Codex.app", result.stdout)
+
+    def test_restart_repairs_thread_metadata_when_codex_reverts_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            write_thread_database(home)
+            rollout = write_rollout(home, "current-custom", "custom")
+            args = SimpleNamespace(restart_codex=True, migrate_latest=True)
+
+            with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
+                with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider openai, not custom"):
+                    cli_module.restart_codex(args, home, "custom")
+
+            meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(meta["payload"]["model_provider"], "openai")
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+            self.assertEqual(providers, {"openai"})
 
 
 if __name__ == "__main__":
