@@ -234,6 +234,7 @@ struct ContentView: View {
     }
 
     private var texts: Texts { Texts(language: language) }
+    private let officialModelOptions = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -246,7 +247,7 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
         .padding(24)
-        .frame(minWidth: 660, minHeight: 520)
+        .frame(minWidth: 660, minHeight: targetMode == .custom ? 520 : 460)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -319,20 +320,36 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
 
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
-                    GridRow {
-                        Text(texts.text("自定义 API 地址", "Custom API URL"))
-                            .frame(width: 130, alignment: .leading)
-                        TextField("https://example.com", text: $model.localBaseURL)
-                    }
-                    GridRow {
-                        Text(texts.text("自定义模型", "Custom Model"))
-                            .frame(width: 130, alignment: .leading)
-                        TextField("gpt-5.5", text: $model.localModel)
+                    if targetMode == .custom {
+                        GridRow {
+                            Text(texts.text("自定义 API 地址", "Custom API URL"))
+                                .frame(width: 130, alignment: .leading)
+                            TextField("https://example.com", text: $model.localBaseURL)
+                        }
+                        GridRow {
+                            Text(texts.text("自定义模型", "Custom Model"))
+                                .frame(width: 130, alignment: .leading)
+                            TextField("gpt-5.5", text: $model.localModel)
+                        }
                     }
                     GridRow {
                         Text(texts.text("官方模型", "Official Model"))
                             .frame(width: 130, alignment: .leading)
-                        TextField("gpt-5.5", text: $model.officialModel)
+                        HStack(spacing: 8) {
+                            TextField("gpt-5.5", text: $model.officialModel)
+                            Menu {
+                                ForEach(officialModelOptions, id: \.self) { option in
+                                    Button(option) {
+                                        model.officialModel = option
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down.circle")
+                                    .imageScale(.large)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .help(texts.text("选择官方模型", "Choose official model"))
+                        }
                     }
                 }
 
