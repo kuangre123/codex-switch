@@ -1,8 +1,8 @@
 # Codex Switch
 
-> 一个很小的 macOS 工具，用来一键切换 Codex 官方登录和自定义 API，并尽量保留当前对话上下文。
+> 一个很小的 macOS 工具，用来一键切换 Codex 和 Claude Code 的官方登录 / 自定义 API。
 
-Codex Switch 适合经常在两种模式之间切换的人。它的核心特性是：切换官方 OpenAI / 自定义 API 后，当前 Codex thread 和上下文历史会尽量保留，你可以继续原来的对话，不用重新开一个会话。
+Codex Switch 适合经常在两种模式之间切换的人。它的核心特性是：切换官方 OpenAI / 自定义 API 后，当前 Codex thread 和上下文历史会尽量保留，你可以继续原来的对话，不用重新开一个会话。现在也支持 Claude Code，通过官方支持的 `~/.claude/settings.json` 的 `env` 配置切换官方 Claude / 自定义 Claude 兼容 API。
 
 - **官方 OpenAI 模式**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`。
 - **自定义 API 模式**：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 `custom`。
@@ -52,9 +52,26 @@ open "$HOME/Applications/Codex Switch.app"
 codex-switch status
 codex-switch local
 codex-switch official
+codex-switch claude-status
+codex-switch claude-local
+codex-switch claude-official
 ```
 
 通过 App 切换模式时，会自动同步当前会话上下文并重启 Codex，让你回到同一条对话里继续使用新的 provider。
+
+切换 Claude Code 时，App 会修改 `~/.claude/settings.json` 里的 `env`：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://your-claude-compatible-endpoint",
+    "ANTHROPIC_AUTH_TOKEN": "your-token",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-6"
+  }
+}
+```
+
+Claude Code 需要重新打开终端会话后读取新配置；它不像 Codex Desktop 那样由 App 自动重启。
 
 App 启动后会自动检查 GitHub Releases，右上角会显示“已是最新版”或可用的新版本号。
 
@@ -80,6 +97,7 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 
 ```text
 ~/.codex/backups/
+~/.claude/backups/
 ```
 
 切换时会保留现有 `auth.json` 里的官方 ChatGPT 登录态。自定义 API Key 会写入 custom provider 的 `experimental_bearer_token`，这样自定义 API 可以用，同时官方登录不会被清掉。

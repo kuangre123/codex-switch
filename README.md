@@ -1,8 +1,8 @@
 # Codex Switch
 
-> One tiny macOS app for switching Codex between Official OpenAI login and a custom OpenAI-compatible API endpoint, while keeping your current conversation context.
+> One tiny macOS app for switching Codex and Claude Code between official login and custom API routes.
 
-Codex Switch is a lightweight helper for people who bounce between the official Codex login and a custom API route. It can switch providers and keep the same Codex thread context, so you can continue the current conversation after moving between Official OpenAI and a custom API. It gives you both a terminal command and a double-click macOS app, keeps backups before every switch, and preserves your official ChatGPT login while routing custom model calls through a relay API key.
+Codex Switch is a lightweight helper for people who bounce between official login and custom API routes. For Codex, it can switch providers and keep the same thread context, so you can continue the current conversation after moving between Official OpenAI and a custom API. It also supports Claude Code by switching its official Claude login/custom API route through `~/.claude/settings.json`.
 
 Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。切换后会尽量保留当前对话上下文，让你继续原来的 Codex 会话。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
 
@@ -36,12 +36,13 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 
 ## Features
 
-- One-click macOS app: switch, status, settings.
+- One-click macOS app: switch Codex or Claude Code, status, settings.
 - Continue the same conversation after switching between Official OpenAI and a custom API.
+- Claude Code support through the official `settings.json` `env` block.
 - CLI for scripting and quick terminal use.
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
-- Automatic backups under `~/.codex/backups`.
+- Automatic backups under `~/.codex/backups` and `~/.claude/backups`.
 - Preserves existing ChatGPT login tokens while custom mode uses a provider-level bearer token.
 - Provider Sync updates existing Codex thread metadata in place, so the current conversation can continue on the selected provider without forking into a new thread.
 - The macOS app automatically restarts Codex after switching so the running desktop app reloads the selected provider.
@@ -96,11 +97,25 @@ open "$HOME/Applications/Codex Switch.app"
 
 The app has three actions:
 
-- **Switch**: choose `Local custom` or `Official OpenAI`.
-- **Status**: show current Codex auth/provider/model.
+- **Switch**: choose `Codex` or `Claude Code`, then `Custom API` or official mode.
+- **Status**: show current auth/provider/model.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
 When switching from the macOS app, existing Codex thread metadata is provider-synced in place, then Codex.app is gracefully quit and reopened so the running session reloads the selected provider. The thread id and conversation history stay in place, so you can continue the original conversation after the switch.
+
+Claude Code switching updates `~/.claude/settings.json` under `env`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://your-claude-compatible-endpoint",
+    "ANTHROPIC_AUTH_TOKEN": "your-token",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-6"
+  }
+}
+```
+
+Restart Claude Code terminal sessions after switching, because Claude Code reads these settings at startup.
 
 ### CLI
 
@@ -108,6 +123,9 @@ When switching from the macOS app, existing Codex thread metadata is provider-sy
 codex-switch status
 codex-switch local
 codex-switch official
+codex-switch claude-status
+codex-switch claude-local
+codex-switch claude-official
 ```
 
 Set custom defaults:

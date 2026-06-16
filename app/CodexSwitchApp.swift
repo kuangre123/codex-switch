@@ -16,6 +16,13 @@ enum ProviderMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum SwitchTarget: String, CaseIterable, Identifiable {
+    case codex
+    case claude
+
+    var id: String { rawValue }
+}
+
 struct Texts {
     let language: AppLanguage
 
@@ -74,6 +81,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var switchSucceeded = false
     @Published var switchFailed = false
     @Published var completedMode = ProviderMode.custom
+    @Published var completedTarget = SwitchTarget.codex
     @Published var updateState = UpdateState.idle
     @Published var releaseURL = URL(string: "https://github.com/kuangre123/codex-switch/releases/latest")!
 
@@ -88,19 +96,19 @@ final class SwitchViewModel: ObservableObject {
         return NSString(string: "~/.local/bin/codex-switch").expandingTildeInPath
     }
 
-    func load() {
+    func load(target: SwitchTarget = .codex) {
         checkForUpdates()
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let status = self.run(["status"])
-            let config = self.run(["config", "show"])
+            let status = self.run(self.statusArguments(for: target))
+            let config = self.run(self.configShowArguments(for: target))
             DispatchQueue.main.async {
                 self.statusValues = self.parse(status.output)
                 let values = self.parse(config.output)
-                self.localBaseURL = values["local_base_url"] ?? "https://jp.icodeeasy.cc"
-                self.localModel = values["local_model"] ?? "gpt-5.5"
-                self.officialModel = values["official_model"] ?? "gpt-5.5"
+                self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
+                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
+                self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if status.status != 0 || config.status != 0 {
                     self.output = [status.output, config.output].filter { !$0.isEmpty }.joined(separator: "\n")
                 }
@@ -154,7 +162,7 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
-    func switchProvider(to mode: ProviderMode) {
+    func switchProvider(to mode: ProviderMode, target: SwitchTarget) {
         isBusy = true
         output = ""
         switchSucceeded = false
@@ -165,8 +173,7 @@ final class SwitchViewModel: ObservableObject {
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let save = self.run([
-                "config", "set",
+            let save = self.run(self.configSetArguments(for: target) + [
                 "--local-base-url", baseURL,
                 "--local-model", local,
                 "--official-model", official,
@@ -179,20 +186,20 @@ final class SwitchViewModel: ObservableObject {
                 }
                 return
             }
-            let command = mode == .custom ? "local" : "official"
-            var switchArguments = [command, "--migrate-latest", "--restart-codex"]
+            var switchArguments = self.switchArguments(for: target, mode: mode)
             var switchInput: String?
             if mode == .custom && !replacementKey.isEmpty {
-                switchArguments.append("--api-key-stdin")
+                switchArguments.append(target == .claude ? "--auth-token-stdin" : "--api-key-stdin")
                 switchInput = replacementKey + "\n"
             }
             let switched = self.run(switchArguments, standardInput: switchInput)
-            let status = self.run(["status"])
+            let status = self.run(self.statusArguments(for: target))
             DispatchQueue.main.async {
                 self.output = switched.output
                 self.statusValues = self.parse(status.output)
                 self.isBusy = false
                 self.completedMode = mode
+                self.completedTarget = target
                 if switched.status == 0 {
                     self.replacementAPIKey = ""
                     self.switchSucceeded = true
@@ -201,6 +208,25 @@ final class SwitchViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func statusArguments(for target: SwitchTarget) -> [String] {
+        target == .claude ? ["claude-status"] : ["status"]
+    }
+
+    private func configShowArguments(for target: SwitchTarget) -> [String] {
+        target == .claude ? ["claude-config", "show"] : ["config", "show"]
+    }
+
+    private func configSetArguments(for target: SwitchTarget) -> [String] {
+        target == .claude ? ["claude-config", "set"] : ["config", "set"]
+    }
+
+    private func switchArguments(for target: SwitchTarget, mode: ProviderMode) -> [String] {
+        if target == .claude {
+            return [mode == .custom ? "claude-local" : "claude-official"]
+        }
+        return [mode == .custom ? "local" : "official", "--migrate-latest", "--restart-codex"]
     }
 
     private func run(_ arguments: [String], standardInput: String? = nil) -> CommandResult {
@@ -245,6 +271,7 @@ final class SwitchViewModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = SwitchViewModel()
     @AppStorage("language") private var languageRaw = AppLanguage.zh.rawValue
+    @State private var targetTool = SwitchTarget.codex
     @State private var targetMode = ProviderMode.custom
 
     private var language: AppLanguage {
@@ -252,7 +279,11 @@ struct ContentView: View {
     }
 
     private var texts: Texts { Texts(language: language) }
-    private let officialModelOptions = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+    private var officialModelOptions: [String] {
+        targetTool == .claude
+            ? ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]
+            : ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -284,7 +315,7 @@ struct ContentView: View {
             if model.isBusy {
                 ZStack {
                     Color.black.opacity(0.08)
-                    ProgressView(texts.text("正在切换并重启 Codex…", "Switching and restarting Codex…"))
+                    ProgressView(progressText)
                         .padding(20)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
@@ -293,7 +324,11 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            model.load()
+            model.load(target: targetTool)
+        }
+        .onChange(of: targetTool) { newValue in
+            model.replacementAPIKey = ""
+            model.load(target: newValue)
         }
     }
 
@@ -302,7 +337,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex Switch")
                     .font(.largeTitle.bold())
-                Text(texts.text("切换 API，同步会话上下文，并重启 Codex 让当前运行时生效。", "Switch APIs, sync thread context, and restart Codex so the running app picks it up."))
+                Text(texts.text("切换 Codex 或 Claude Code 的 API 路由。", "Switch API routes for Codex or Claude Code."))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -331,9 +366,15 @@ struct ContentView: View {
     private var settingsCard: some View {
         GroupBox(texts.text("切换设置", "Switch Settings")) {
             VStack(alignment: .leading, spacing: 14) {
+                Picker(texts.text("目标工具", "Target Tool"), selection: $targetTool) {
+                    Text("Codex").tag(SwitchTarget.codex)
+                    Text("Claude Code").tag(SwitchTarget.claude)
+                }
+                .pickerStyle(.segmented)
+
                 Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
                     Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
-                    Text(texts.text("官方 OpenAI", "Official OpenAI")).tag(ProviderMode.official)
+                    Text(officialProviderTitle).tag(ProviderMode.official)
                 }
                 .pickerStyle(.segmented)
 
@@ -343,7 +384,7 @@ struct ContentView: View {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
                         settingRow(texts.text("自定义模型", "Custom Model")) {
-                            TextField("gpt-5.5", text: $model.localModel)
+                            TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
                         }
                         settingRow(texts.text("新 API Key", "New API Key")) {
                             SecureField(apiKeyPlaceholder, text: $model.replacementAPIKey)
@@ -352,7 +393,7 @@ struct ContentView: View {
                     }
                     settingRow(texts.text("官方模型", "Official Model")) {
                         HStack(spacing: 8) {
-                            TextField("gpt-5.5", text: $model.officialModel)
+                            TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.officialModel)
                             Menu {
                                 ForEach(officialModelOptions, id: \.self) { option in
                                     Button(option) {
@@ -370,7 +411,7 @@ struct ContentView: View {
                 }
 
                 Button {
-                    model.switchProvider(to: targetMode)
+                    model.switchProvider(to: targetMode, target: targetTool)
                 } label: {
                     Label(texts.text("确认切换", "Confirm Switch"), systemImage: "arrow.triangle.2.circlepath")
                         .frame(maxWidth: .infinity)
@@ -381,6 +422,18 @@ struct ContentView: View {
             }
             .padding(.top, 6)
         }
+    }
+
+    private var progressText: String {
+        targetTool == .claude
+            ? texts.text("正在切换 Claude Code 配置…", "Switching Claude Code settings…")
+            : texts.text("正在切换并重启 Codex…", "Switching and restarting Codex…")
+    }
+
+    private var officialProviderTitle: String {
+        targetTool == .claude
+            ? texts.text("官方 Claude", "Official Claude")
+            : texts.text("官方 OpenAI", "Official OpenAI")
     }
 
     private var outputCard: some View {
@@ -436,6 +489,11 @@ struct ContentView: View {
             return model.output.isEmpty
                 ? texts.text("请检查配置后重试。", "Check the configuration and try again.")
                 : model.output
+        }
+        if model.completedTarget == .claude {
+            return model.completedMode == .custom
+                ? texts.text("已切换 Claude Code 到自定义 API。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to the custom API. Restart Claude Code terminal sessions to apply it.")
+                : texts.text("已切换 Claude Code 到官方 Claude。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to Official Claude. Restart Claude Code terminal sessions to apply it.")
         }
         return model.completedMode == .custom
             ? texts.text("已切换到自定义 API，并已重启 Codex 让设置生效。", "Switched to the custom API and restarted Codex to apply it.")

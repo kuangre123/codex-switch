@@ -32,6 +32,23 @@ def run_tool(home: Path, *args: str, input_text: str | None = None) -> subproces
     )
 
 
+def run_tool_with_env(env_updates: dict[str, str], *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update(env_updates)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        env=env,
+        text=True,
+        input=input_text,
+        capture_output=True,
+        check=False,
+    )
+
+
+def run_claude_tool(home: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return run_tool_with_env({"CLAUDE_CONFIG_DIR": str(home)}, *args, input_text=input_text)
+
+
 def write_sample_config(home: Path) -> None:
     home.mkdir(parents=True)
     (home / "config.toml").write_text(
@@ -491,6 +508,78 @@ class CodexSwitchTests(unittest.TestCase):
 
             self.assertEqual(show.returncode, 0, show.stderr)
             self.assertIn("local_base_url: https://jp.icodeeasy.cc", show.stdout)
+
+    def test_claude_local_switch_writes_env_and_redacts_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".claude"
+            home.mkdir()
+            (home / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "agentPushNotifEnabled": False,
+                        "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_claude_tool(
+                home,
+                "claude-local",
+                "--base-url",
+                "https://claude.example.com",
+                "--model",
+                "router/claude-sonnet",
+                "--auth-token-stdin",
+                input_text="sk-claude-secret\n",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("sk-claude-secret", result.stdout)
+            settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+            self.assertFalse(settings["agentPushNotifEnabled"])
+            self.assertEqual(settings["env"]["ANTHROPIC_BASE_URL"], "https://claude.example.com")
+            self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-claude-secret")
+            self.assertEqual(settings["env"]["ANTHROPIC_MODEL"], "router/claude-sonnet")
+            self.assertNotIn("ANTHROPIC_API_KEY", settings["env"])
+
+    def test_claude_official_switch_removes_custom_route_and_preserves_saved_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".claude"
+            home.mkdir()
+            (home / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://claude.example.com",
+                            "ANTHROPIC_AUTH_TOKEN": "sk-claude-secret",
+                            "ANTHROPIC_MODEL": "router/claude-sonnet",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_claude_tool(home, "claude-official", "--model", "claude-opus-4-6")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+            self.assertNotIn("ANTHROPIC_BASE_URL", settings["env"])
+            self.assertNotIn("ANTHROPIC_AUTH_TOKEN", settings["env"])
+            self.assertEqual(settings["env"]["ANTHROPIC_MODEL"], "claude-opus-4-6")
+            state = json.loads((home / "claude-switch-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["local_api_key"], "sk-claude-secret")
+
+    def test_claude_local_switch_rejects_empty_token_from_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".claude"
+            home.mkdir()
+            (home / "settings.json").write_text("{}", encoding="utf-8")
+
+            result = run_claude_tool(home, "claude-local", "--auth-token-stdin", input_text="\n")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("stdin was empty", result.stderr)
 
     def test_official_switch_uses_cached_official_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

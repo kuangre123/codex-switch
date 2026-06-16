@@ -23,6 +23,9 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
+CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
+CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
+CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
 RESTART_SETTLE_SECONDS = 3.0
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 
@@ -41,6 +44,10 @@ class RolloutSyncInfo:
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+
+
+def claude_home() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
 
 
 def redacted_key(value: str | None) -> str:
@@ -63,8 +70,24 @@ def load_auth(auth_path: Path) -> dict[str, object]:
     return data
 
 
+def load_json_object(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SwitchError(f"Invalid JSON in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SwitchError(f"Expected {path} to contain a JSON object")
+    return data
+
+
 def state_path(home: Path) -> Path:
     return home / "codex-switch-state.json"
+
+
+def claude_state_path(home: Path) -> Path:
+    return home / "claude-switch-state.json"
 
 
 def load_state(home: Path) -> dict[str, object]:
@@ -82,6 +105,18 @@ def load_state(home: Path) -> dict[str, object]:
 
 def save_state(home: Path, state: dict[str, object]) -> None:
     atomic_write(state_path(home), json.dumps(state, indent=2, sort_keys=True) + "\n", 0o600)
+
+
+def load_claude_state(home: Path) -> dict[str, object]:
+    path = claude_state_path(home)
+    if not path.exists():
+        return {}
+    data = load_json_object(path)
+    return data
+
+
+def save_claude_state(home: Path, state: dict[str, object]) -> None:
+    atomic_write(claude_state_path(home), json.dumps(state, indent=2, sort_keys=True) + "\n", 0o600)
 
 
 def effective_setting(state: dict[str, object], key: str, fallback: str) -> str:
@@ -520,6 +555,173 @@ def config_set(args: argparse.Namespace) -> int:
     return config_show(args)
 
 
+def load_claude_settings(settings_path: Path) -> dict[str, object]:
+    return load_json_object(settings_path)
+
+
+def save_claude_settings(settings_path: Path, settings: dict[str, object]) -> None:
+    mode = 0o600
+    if settings_path.exists():
+        mode = stat.S_IMODE(settings_path.stat().st_mode) or 0o600
+    atomic_write(settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n", mode)
+
+
+def claude_env(settings: dict[str, object]) -> dict[str, object]:
+    env = settings.get("env")
+    if isinstance(env, dict):
+        return env
+    env = {}
+    settings["env"] = env
+    return env
+
+
+def remember_current_claude(settings: dict[str, object], state: dict[str, object]) -> None:
+    env = claude_env(settings)
+    token = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")
+    if isinstance(token, str) and token.strip():
+        state["local_api_key"] = token.strip()
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    if isinstance(base_url, str) and base_url.strip():
+        state["local_base_url"] = base_url.strip()
+    model = env.get("ANTHROPIC_MODEL")
+    if isinstance(model, str) and model.strip():
+        if env.get("ANTHROPIC_BASE_URL"):
+            state["local_model"] = model.strip()
+        else:
+            state["official_model"] = model.strip()
+
+
+def claude_model_from_env(env: dict[str, object], fallback: str) -> str:
+    for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"):
+        value = env.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def switch_claude_local(args: argparse.Namespace) -> int:
+    home = claude_home()
+    settings_path = home / "settings.json"
+    backup_dir = home / "backups"
+    settings = load_claude_settings(settings_path)
+    state = load_claude_state(home)
+    env = claude_env(settings)
+    remember_current_claude(settings, state)
+
+    base_url = args.base_url or effective_setting(state, "local_base_url", CLAUDE_DEFAULT_BASE_URL)
+    model = args.model or effective_setting(state, "local_model", CLAUDE_DEFAULT_MODEL)
+    cached_key = state.get("local_api_key")
+    stdin_key = ""
+    if getattr(args, "auth_token_stdin", False):
+        stdin_key = sys.stdin.readline().strip()
+        if not stdin_key:
+            raise SwitchError("Claude API token from stdin was empty.")
+    api_key = stdin_key or args.auth_token or str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or "").strip()
+    if not api_key and isinstance(cached_key, str):
+        api_key = cached_key.strip()
+    if not api_key:
+        raise SwitchError("No Claude API token found. Re-run with --auth-token or --auth-token-stdin.")
+
+    backup_file(settings_path, backup_dir)
+    state["local_base_url"] = base_url
+    state["local_model"] = model
+    state["local_api_key"] = api_key
+    save_claude_state(home, state)
+
+    env["ANTHROPIC_BASE_URL"] = base_url
+    env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    env["ANTHROPIC_MODEL"] = model
+    env.pop("ANTHROPIC_API_KEY", None)
+    save_claude_settings(settings_path, settings)
+
+    print("Switched Claude Code to custom API mode.")
+    print(f"claude_home: {home}")
+    print(f"base_url: {base_url}")
+    print(f"model: {model}")
+    print(f"api_key: {redacted_key(api_key)}")
+    print(f"backup_dir: {backup_dir}")
+    print("Restart Claude Code terminal sessions for the new settings to take effect.")
+    return 0
+
+
+def switch_claude_official(args: argparse.Namespace) -> int:
+    home = claude_home()
+    settings_path = home / "settings.json"
+    backup_dir = home / "backups"
+    settings = load_claude_settings(settings_path)
+    state = load_claude_state(home)
+    env = claude_env(settings)
+    remember_current_claude(settings, state)
+
+    model = args.model or effective_setting(state, "official_model", CLAUDE_DEFAULT_OFFICIAL_MODEL)
+    backup_file(settings_path, backup_dir)
+    state["official_model"] = model
+    save_claude_state(home, state)
+
+    env.pop("ANTHROPIC_BASE_URL", None)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    env["ANTHROPIC_MODEL"] = model
+    save_claude_settings(settings_path, settings)
+
+    print("Switched Claude Code to official Claude login mode.")
+    print(f"claude_home: {home}")
+    print("model_provider: official")
+    print(f"model: {model}")
+    print(f"backup_dir: {backup_dir}")
+    print("Saved custom Claude API settings were preserved for later.")
+    print("Restart Claude Code terminal sessions for the new settings to take effect.")
+    return 0
+
+
+def claude_status(_: argparse.Namespace) -> int:
+    home = claude_home()
+    settings = load_claude_settings(home / "settings.json")
+    env = claude_env(settings)
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    token = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")
+    provider = "custom" if isinstance(base_url, str) and base_url.strip() else "official"
+    auth_mode = "auth_token" if env.get("ANTHROPIC_AUTH_TOKEN") else "api_key" if env.get("ANTHROPIC_API_KEY") else "claude-login"
+    print(f"claude_home: {home}")
+    print(f"auth_mode: {auth_mode}")
+    print(f"api_key: {redacted_key(token if isinstance(token, str) else None)}")
+    print(f"model_provider: {provider}")
+    print(f"model: {claude_model_from_env(env, CLAUDE_DEFAULT_OFFICIAL_MODEL)}")
+    print(f"custom.base_url: {base_url if isinstance(base_url, str) and base_url.strip() else '(missing)'}")
+    return 0
+
+
+def claude_config_show(_: argparse.Namespace) -> int:
+    home = claude_home()
+    settings = load_claude_settings(home / "settings.json")
+    env = claude_env(settings)
+    state = load_claude_state(home)
+    print(f"claude_home: {home}")
+    print(f"local_base_url: {effective_setting(state, 'local_base_url', str(env.get('ANTHROPIC_BASE_URL') or CLAUDE_DEFAULT_BASE_URL))}")
+    print(f"local_model: {effective_setting(state, 'local_model', claude_model_from_env(env, CLAUDE_DEFAULT_MODEL))}")
+    print(f"official_model: {effective_setting(state, 'official_model', CLAUDE_DEFAULT_OFFICIAL_MODEL)}")
+    return 0
+
+
+def claude_config_set(args: argparse.Namespace) -> int:
+    home = claude_home()
+    state = load_claude_state(home)
+    updates = {
+        "local_base_url": args.local_base_url,
+        "local_model": args.local_model,
+        "official_model": args.official_model,
+    }
+    for key, value in updates.items():
+        if value is not None:
+            stripped = value.strip()
+            if not stripped:
+                raise SwitchError(f"{key} cannot be empty")
+            state[key] = stripped
+    save_claude_state(home, state)
+    print("Saved Claude Code Switch settings.")
+    return claude_config_show(args)
+
+
 def prompt_api_key(args: argparse.Namespace) -> int:
     key = getpass.getpass("OpenAI/local relay API key: ").strip()
     if not key:
@@ -570,6 +772,31 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser.add_argument("--local-model", help="Default local model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.set_defaults(func=config_set)
+
+    claude_local = subparsers.add_parser("claude-local", help="Use Claude Code custom API mode.")
+    claude_key_source = claude_local.add_mutually_exclusive_group()
+    claude_key_source.add_argument("--auth-token", help="Claude-compatible API token. Omit to reuse existing token.")
+    claude_key_source.add_argument("--auth-token-stdin", action="store_true", help="Read a replacement Claude API token from stdin.")
+    claude_local.add_argument("--base-url", help=f"Claude API base URL. Default: saved setting or {CLAUDE_DEFAULT_BASE_URL}")
+    claude_local.add_argument("--model", help=f"Claude model name. Default: saved setting or {CLAUDE_DEFAULT_MODEL}")
+    claude_local.set_defaults(func=switch_claude_local)
+
+    claude_official = subparsers.add_parser("claude-official", help="Use Claude Code official Claude login mode.")
+    claude_official.add_argument("--model", help=f"Official Claude model. Default: saved setting or {CLAUDE_DEFAULT_OFFICIAL_MODEL}")
+    claude_official.set_defaults(func=switch_claude_official)
+
+    claude_status_parser = subparsers.add_parser("claude-status", help="Show current Claude Code switch-relevant state.")
+    claude_status_parser.set_defaults(func=claude_status)
+
+    claude_config_parser = subparsers.add_parser("claude-config", help="Show or update Claude Code Switch defaults.")
+    claude_config_subparsers = claude_config_parser.add_subparsers(dest="claude_config_command", required=True)
+    claude_config_show_parser = claude_config_subparsers.add_parser("show", help="Show saved Claude Code Switch defaults.")
+    claude_config_show_parser.set_defaults(func=claude_config_show)
+    claude_config_set_parser = claude_config_subparsers.add_parser("set", help="Update saved Claude Code Switch defaults.")
+    claude_config_set_parser.add_argument("--local-base-url", help="Default Claude API base URL.")
+    claude_config_set_parser.add_argument("--local-model", help="Default Claude custom model.")
+    claude_config_set_parser.add_argument("--official-model", help="Default official Claude model.")
+    claude_config_set_parser.set_defaults(func=claude_config_set)
 
     return parser
 
