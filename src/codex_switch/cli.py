@@ -340,7 +340,11 @@ def custom_model_entry(model: str, display_name: str) -> dict[str, object]:
         "context_window": 200000,
         "max_output_tokens": 100000,
         "supports_reasoning_summaries": True,
-        "supported_reasoning_levels": ["minimal", "low", "medium", "high"],
+        "supported_reasoning_levels": [
+            {"effort": "low", "description": "Fast responses with lighter reasoning"},
+            {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+            {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        ],
         "default_reasoning_level": "medium",
         "supports_parallel_tool_calls": True,
         "input_modalities": ["text", "image"],
