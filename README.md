@@ -139,10 +139,12 @@ Configure Codex official and custom providers in parallel:
 ```bash
 codex-switch configure \
   --base-url https://jp.icodeeasy.cc \
-  --custom-model gpt-5.5 \
+  --custom-model my-gpt-5.5 \
   --custom-model-name "My Model" \
   --official-model gpt-5.2-codex
 ```
+
+`--custom-model` must be a unique model ID that is different from the official Codex model IDs. Codex de-duplicates models by ID, so using `gpt-5.5` for both the official and custom route will hide the custom display name. If your upstream API only accepts `gpt-5.5`, map the custom ID such as `my-gpt-5.5` back to the real upstream model in your API proxy.
 
 Temporarily override the custom API endpoint:
 

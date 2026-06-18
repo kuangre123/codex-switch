@@ -108,7 +108,7 @@ final class SwitchViewModel: ObservableObject {
                 self.statusValues = self.parse(status.output)
                 let values = self.parse(config.output)
                 self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
-                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
+                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5")
                 self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if status.status != 0 || config.status != 0 {
@@ -436,7 +436,17 @@ struct ContentView: View {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
                         settingRow(texts.text("自定义模型 ID", "Custom Model ID")) {
-                            TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
+                            VStack(alignment: .leading, spacing: 4) {
+                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5", text: $model.localModel)
+                                if targetTool == .codex {
+                                    Text(texts.text(
+                                        "必须和官方模型 ID 不同，例如 my-gpt-5.5；否则 Codex 会按 ID 去重，看不到显示名称。",
+                                        "Must be different from official model IDs, such as my-gpt-5.5; otherwise Codex de-duplicates it and the display name will not appear."
+                                    ))
+                                    .font(.caption)
+                                    .foregroundStyle(model.localModel == model.officialModel || officialModelOptions.contains(model.localModel) ? Color.red : Color.secondary)
+                                }
+                            }
                         }
                         if targetTool == .codex {
                             settingRow(texts.text("显示名称", "Display Name")) {

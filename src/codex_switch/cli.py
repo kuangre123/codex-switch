@@ -23,6 +23,7 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
+DEFAULT_CUSTOM_MODEL = "my-gpt-5.5"
 CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
@@ -366,6 +367,23 @@ def load_official_models(home: Path) -> list[dict[str, object]]:
     return [dict(item) for item in models if isinstance(item, dict)]
 
 
+def official_model_slugs(home: Path) -> set[str]:
+    return {item["slug"] for item in load_official_models(home) if isinstance(item.get("slug"), str)}
+
+
+def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: str | None = None) -> None:
+    reserved = official_model_slugs(home)
+    if official_model:
+        reserved.add(official_model)
+    if custom_model in reserved:
+        examples = "my-gpt-5.5 or jp/gpt-5.5"
+        raise SwitchError(
+            "Custom model ID must be different from official Codex model IDs. "
+            f"`{custom_model}` is already an official model slug, so Codex will de-duplicate it and the custom display name will not appear. "
+            f"Use a unique ID such as {examples}, and make sure your custom API or proxy accepts that model ID."
+        )
+
+
 def custom_model_catalog(
     home: Path,
     model: str,
@@ -643,9 +661,10 @@ def configure_codex(args: argparse.Namespace) -> int:
     state = load_state(home)
     remember_current_auth(home, auth, state)
     base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
-    custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_MODEL)
+    custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_CUSTOM_MODEL)
     display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", custom_model)
     official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    ensure_distinct_custom_model(home, custom_model, official_model)
     cached_key = state.get("local_api_key")
     stdin_key = ""
     if getattr(args, "api_key_stdin", False):
@@ -716,8 +735,8 @@ def config_show(_: argparse.Namespace) -> int:
     state = load_state(home)
     print(f"codex_home: {home}")
     print(f"local_base_url: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
-    print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
-    print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_MODEL))}")
+    print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL)}")
+    print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL))}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     return 0
 
@@ -748,6 +767,7 @@ def codex_register_model(args: argparse.Namespace) -> int:
     model = args.model.strip()
     if not model:
         raise SwitchError("model cannot be empty")
+    ensure_distinct_custom_model(home, model)
     display_name = args.name.strip() if args.name else model
     if not display_name:
         raise SwitchError("model display name cannot be empty")
@@ -991,7 +1011,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure_key_source.add_argument("--api-key-stdin", action="store_true", help="Read a replacement API key from stdin.")
     configure.add_argument("--base-url", help=f"Custom API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
     configure.add_argument("--model", help=argparse.SUPPRESS)
-    configure.add_argument("--custom-model", help=f"Custom model slug. Default: saved setting or {DEFAULT_MODEL}")
+    configure.add_argument("--custom-model", help=f"Custom model slug. Must be different from official Codex model IDs. Default: saved setting or {DEFAULT_CUSTOM_MODEL}")
     configure.add_argument("--custom-model-name", help="Display name for the custom model.")
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")

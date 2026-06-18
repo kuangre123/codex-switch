@@ -323,6 +323,37 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(catalog["models"][1]["display_name"], "我的模型")
             self.assertNotIn("Provider-synced", result.stdout)
 
+    def test_configure_codex_rejects_duplicate_official_custom_model_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(
+                json.dumps({"models": [{"slug": "gpt-5.5", "display_name": "GPT-5.5"}]}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "configure",
+                "--base-url",
+                "https://custom.example/v1",
+                "--custom-model",
+                "gpt-5.5",
+                "--custom-model-name",
+                "我的模型",
+                "--official-model",
+                "gpt-5.5",
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Custom model ID must be different", result.stderr)
+            self.assertIn("display name will not appear", result.stderr)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
