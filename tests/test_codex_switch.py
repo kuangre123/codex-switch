@@ -179,7 +179,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('requires_openai_auth = true', config)
             self.assertIn('wire_api = "responses"', config)
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
+            self.assertIn('model_catalog_json = "', config)
+            self.assertIn('models = ["gpt-5.5"]', config)
             self.assertIn('[projects."/Users/sirchen/Documents/aimashi"]', config)
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["models"][0]["slug"], "gpt-5.5")
+            self.assertEqual(catalog["models"][0]["display_name"], "gpt-5.5")
             self.assertTrue((home / "backups").is_dir())
             self.assertTrue(any(p.name.startswith("config.toml.") for p in (home / "backups").iterdir()))
             self.assertEqual(stat.S_IMODE((home / "auth.json").stat().st_mode), 0o600)
@@ -205,6 +210,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model = "gpt-5.5"', config)
             self.assertIn('preferred_auth_method = "chatgpt"', config)
             self.assertIn('base_url = "http://127.0.0.1:9999/v1"', config)
+            self.assertNotIn("model_catalog_json", config)
             self.assertNotIn("experimental_bearer_token", config)
             self.assertNotIn("sk-test-secret", result.stdout)
             self.assertEqual(read_state(home)["local_api_key"], "sk-test-secret")
@@ -236,6 +242,7 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "http://127.0.0.1:18888/v1"', config)
             self.assertIn('model = "local-model"', config)
+            self.assertIn('models = ["local-model"]', config)
             self.assertIn('experimental_bearer_token = "sk-cached-secret"', config)
             self.assertNotIn("sk-cached-secret", result.stdout)
 
@@ -261,6 +268,18 @@ class CodexSwitchTests(unittest.TestCase):
                 'experimental_bearer_token = "sk-new-secret"',
                 (home / "config.toml").read_text(encoding="utf-8"),
             )
+
+    def test_register_model_writes_codex_model_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+
+            result = run_tool(home, "register-model", "my-custom-model")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["models"][0]["slug"], "my-custom-model")
+            self.assertEqual(read_state(home)["local_model"], "my-custom-model")
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

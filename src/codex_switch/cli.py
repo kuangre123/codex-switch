@@ -28,6 +28,8 @@ CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
 RESTART_SETTLE_SECONDS = 3.0
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
+CUSTOM_PROVIDER_ID = "custom"
+MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
 
 
 class SwitchError(RuntimeError):
@@ -193,6 +195,24 @@ def set_key(lines: list[str], key: str, value: str) -> list[str]:
     return lines
 
 
+def set_raw_key(lines: list[str], key: str, rendered_value: str) -> list[str]:
+    pattern = re.compile(rf"^(\s*){re.escape(key)}\s*=")
+    rendered = f"{key} = {rendered_value}\n"
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = rendered
+            return lines
+    insert_at = len(lines)
+    while insert_at > 0 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines.insert(insert_at, rendered)
+    return lines
+
+
+def quoted_array(values: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(value) for value in values) + "]"
+
+
 def set_bool_key(lines: list[str], key: str, value: bool) -> list[str]:
     pattern = re.compile(rf"^(\s*){re.escape(key)}\s*=")
     rendered = f"{key} = {'true' if value else 'false'}\n"
@@ -212,42 +232,45 @@ def remove_key(lines: list[str], key: str) -> list[str]:
     return [line for line in lines if not pattern.match(line)]
 
 
-def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str, api_key: str) -> list[tuple[str, list[str]]]:
+def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str, api_key: str, models: list[str]) -> list[tuple[str, list[str]]]:
     updated: list[tuple[str, list[str]]] = []
     found = False
     for section, lines in sections:
-        if section == "[model_providers.custom]":
+        if section == f"[model_providers.{CUSTOM_PROVIDER_ID}]":
             found = True
             lines = set_key(lines, "base_url", base_url)
-            lines = set_key(lines, "name", "custom")
+            lines = set_key(lines, "name", CUSTOM_PROVIDER_ID)
             lines = set_bool_key(lines, "requires_openai_auth", True)
             lines = set_key(lines, "wire_api", "responses")
             lines = set_key(lines, "experimental_bearer_token", api_key)
+            lines = set_raw_key(lines, "models", quoted_array(models))
         updated.append((section, lines))
     if not found:
         lines = [
             "\n" if updated and updated[-1][1] and updated[-1][1][-1].strip() else "",
-            "[model_providers.custom]\n",
+            f"[model_providers.{CUSTOM_PROVIDER_ID}]\n",
             f'base_url = "{base_url}"\n',
-            'name = "custom"\n',
+            f'name = "{CUSTOM_PROVIDER_ID}"\n',
             "requires_openai_auth = true\n",
             'wire_api = "responses"\n',
             f'experimental_bearer_token = "{api_key}"\n',
+            f"models = {quoted_array(models)}\n",
         ]
-        updated.append(("[model_providers.custom]", lines))
+        updated.append((f"[model_providers.{CUSTOM_PROVIDER_ID}]", lines))
     return updated
 
 
-def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str) -> str:
+def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
     for section, lines in sections:
         if section == "":
-            lines = set_key(lines, "model_provider", "custom")
+            lines = set_key(lines, "model_provider", CUSTOM_PROVIDER_ID)
             lines = set_key(lines, "model", model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
+            lines = set_key(lines, "model_catalog_json", str(catalog_path))
         rewritten.append((section, lines))
-    rewritten = ensure_custom_provider(rewritten, base_url, api_key)
+    rewritten = ensure_custom_provider(rewritten, base_url, api_key, [model])
     return "".join(line for _, lines in rewritten for line in lines)
 
 
@@ -259,7 +282,8 @@ def rewrite_config_for_official(content: str, model: str) -> str:
             lines = set_key(lines, "model_provider", "openai")
             lines = set_key(lines, "model", model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
-        elif section == "[model_providers.custom]":
+            lines = remove_key(lines, "model_catalog_json")
+        elif section == f"[model_providers.{CUSTOM_PROVIDER_ID}]":
             lines = remove_key(lines, "experimental_bearer_token")
         rewritten.append((section, lines))
     return "".join(line for _, lines in rewritten for line in lines)
@@ -280,6 +304,35 @@ def configured_provider(content: str) -> str:
             if match:
                 return match.group(1)
     return "openai"
+
+
+def model_catalog_path(home: Path) -> Path:
+    return home / MODEL_CATALOG_NAME
+
+
+def custom_model_catalog(model: str) -> dict[str, object]:
+    return {
+        "models": [
+            {
+                "slug": model,
+                "display_name": model,
+                "description": "Custom model registered by Codex Switch",
+                "supported_in_api": True,
+                "context_window": 200000,
+                "max_output_tokens": 100000,
+                "supports_reasoning_summaries": True,
+                "supported_reasoning_levels": ["minimal", "low", "medium", "high"],
+                "default_reasoning_level": "medium",
+                "supports_parallel_tool_calls": True,
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"],
+            }
+        ]
+    }
+
+
+def write_model_catalog(path: Path, model: str) -> None:
+    atomic_write(path, json.dumps(custom_model_catalog(model), indent=2, ensure_ascii=False) + "\n", 0o600)
 
 
 def rollout_files(home: Path) -> list[Path]:
@@ -433,6 +486,7 @@ def switch_local(args: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
     config_path = home / "config.toml"
+    catalog_path = model_catalog_path(home)
     backup_dir = home / "backups"
 
     auth = load_auth(auth_path)
@@ -455,17 +509,20 @@ def switch_local(args: argparse.Namespace) -> int:
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
+    backup_file(catalog_path, backup_dir)
     save_state(home, state)
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key)
+    write_model_catalog(catalog_path, model)
+    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, catalog_path)
     atomic_write(config_path, config, 0o600)
 
     print("Switched Codex to local relay API mode.")
     print(f"codex_home: {home}")
     print(f"base_url: {base_url}")
     print(f"model: {model}")
+    print(f"model_catalog_json: {catalog_path}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
@@ -498,7 +555,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print("model_provider: openai")
     print(f"model: {model}")
     print(f"backup_dir: {backup_dir}")
-    print("Existing ChatGPT login tokens and custom API key were preserved.")
+    print("Existing ChatGPT login tokens, custom API key, and custom model catalog were preserved.")
     print_migration(home, "openai", model, args)
     restart_codex(args, home, "openai")
     return 0
@@ -514,7 +571,7 @@ def status(_: argparse.Namespace) -> int:
     print(f"codex_home: {home}")
     print(f"auth_mode: {auth.get('auth_mode') or '(missing)'}")
     print(f"api_key: {redacted_key(auth.get('OPENAI_API_KEY') if isinstance(auth.get('OPENAI_API_KEY'), str) else None)}")
-    for key in ("model_provider", "model", "preferred_auth_method"):
+    for key in ("model_provider", "model", "preferred_auth_method", "model_catalog_json"):
         match = re.search(rf"^{re.escape(key)}\s*=\s*\"([^\"]*)\"", config, re.MULTILINE)
         print(f"{key}: {match.group(1) if match else '(missing)'}")
     base_url = re.search(
@@ -553,6 +610,25 @@ def config_set(args: argparse.Namespace) -> int:
     save_state(home, state)
     print("Saved Codex Switch settings.")
     return config_show(args)
+
+
+def codex_register_model(args: argparse.Namespace) -> int:
+    home = codex_home()
+    state = load_state(home)
+    model = args.model.strip()
+    if not model:
+        raise SwitchError("model cannot be empty")
+    catalog_path = model_catalog_path(home)
+    backup_file(catalog_path, home / "backups")
+    state["local_model"] = model
+    save_state(home, state)
+    write_model_catalog(catalog_path, model)
+    print("Registered custom Codex model catalog.")
+    print(f"codex_home: {home}")
+    print(f"model: {model}")
+    print(f"model_catalog_json: {catalog_path}")
+    print("Switch to custom API mode to write this path into config.toml.")
+    return 0
 
 
 def load_claude_settings(settings_path: Path) -> dict[str, object]:
@@ -772,6 +848,10 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser.add_argument("--local-model", help="Default local model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.set_defaults(func=config_set)
+
+    register_model_parser = subparsers.add_parser("register-model", help="Write a Codex model catalog for a custom model.")
+    register_model_parser.add_argument("model", help="Custom model slug to expose to Codex.")
+    register_model_parser.set_defaults(func=codex_register_model)
 
     claude_local = subparsers.add_parser("claude-local", help="Use Claude Code custom API mode.")
     claude_key_source = claude_local.add_mutually_exclusive_group()

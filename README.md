@@ -49,6 +49,7 @@ Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml`
 - The toolbar automatically checks GitHub Releases and shows whether an update is available.
 - Official OpenAI mode hides custom API fields while keeping saved custom settings for later.
 - Official model can be selected from a preset menu or typed manually.
+- Codex custom models are registered with the official `model_catalog_json` config path, so typed custom model names can appear in Codex model metadata.
 - Custom API keys can be replaced from the app using a secure field; leave it blank to keep the saved key.
 - The app bundles its matching CLI, so app and command behavior stay in sync after updates.
 - No Python dependencies beyond the standard library.
@@ -143,6 +144,12 @@ Temporarily override the custom API endpoint:
 codex-switch local --base-url https://your-endpoint.example.com --model your-model
 ```
 
+Register a custom Codex model catalog without switching immediately:
+
+```bash
+codex-switch register-model your-model
+```
+
 Prompt for and save an API key:
 
 ```bash
@@ -166,6 +173,7 @@ Codex Switch edits only the user Codex files:
 ~/.codex/auth.json
 ~/.codex/config.toml
 ~/.codex/codex-switch-state.json
+~/.codex/codex-switch-model-catalog.json
 ```
 
 When Provider Sync is enabled by the app or `--migrate-latest`, it also updates existing Codex Desktop thread metadata:
@@ -190,12 +198,14 @@ Custom mode writes the custom API key into the custom provider, while keeping Ch
 
 ```toml
 model_provider = "custom"
+model_catalog_json = "/Users/you/.codex/codex-switch-model-catalog.json"
 preferred_auth_method = "chatgpt"
 
 [model_providers.custom]
 base_url = "https://jp.icodeeasy.cc"
 requires_openai_auth = true
 wire_api = "responses"
+models = ["your-model"]
 experimental_bearer_token = "sk-..."
 ```
 

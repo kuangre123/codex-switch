@@ -79,6 +79,8 @@ App 启动后会自动检查 GitHub Releases，右上角会显示“已是最新
 
 官方模型支持从预设菜单选择，也可以手动输入新的模型名。
 
+Codex 自定义模型会按官方 `model_catalog_json` 配置写入 `~/.codex/codex-switch-model-catalog.json`，不是只改一个模型字符串。这样手动输入的自定义模型也能进入 Codex 的模型元数据。
+
 自定义 API 模式提供“新 API Key”安全输入框：留空会继续使用现有 Key，输入新 Key 后会在切换时更新，界面不会回显明文。
 
 App 内置与自身版本匹配的 CLI，更新 App 后不会再因为外部 CLI 版本较旧而参数不兼容。
@@ -87,6 +89,7 @@ App 内置与自身版本匹配的 CLI，更新 App 后不会再因为外部 CLI
 
 ```bash
 codex-switch config set --local-base-url https://your-endpoint.example.com
+codex-switch register-model your-model
 ```
 
 或者在 App 里点 **Settings** 修改。
@@ -98,6 +101,12 @@ codex-switch config set --local-base-url https://your-endpoint.example.com
 ```text
 ~/.codex/backups/
 ~/.claude/backups/
+```
+
+Codex 自定义模型目录文件：
+
+```text
+~/.codex/codex-switch-model-catalog.json
 ```
 
 切换时会保留现有 `auth.json` 里的官方 ChatGPT 登录态。自定义 API Key 会写入 custom provider 的 `experimental_bearer_token`，这样自定义 API 可以用，同时官方登录不会被清掉。

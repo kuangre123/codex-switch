@@ -282,7 +282,7 @@ struct ContentView: View {
     private var officialModelOptions: [String] {
         targetTool == .claude
             ? ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]
-            : ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+            : ["gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5.1", "gpt-5.5"]
     }
 
     var body: some View {
@@ -356,6 +356,9 @@ struct ContentView: View {
                 statusRow(texts.text("Provider", "Provider"), model.statusValues["model_provider"] ?? "-")
                 statusRow(texts.text("模型", "Model"), model.statusValues["model"] ?? "-")
                 statusRow(texts.text("自定义地址", "Custom URL"), model.statusValues["custom.base_url"] ?? "-")
+                if targetTool == .codex {
+                    statusRow(texts.text("模型目录", "Model Catalog"), model.statusValues["model_catalog_json"] ?? "-")
+                }
                 statusRow(texts.text("API Key", "API Key"), model.statusValues["api_key"] ?? "-")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
