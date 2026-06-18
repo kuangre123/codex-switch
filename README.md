@@ -4,6 +4,15 @@
 
 Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it now keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's model catalog, and lets you choose the actual model inside Codex. It also supports Claude Code by updating its official Claude login/custom API route through `~/.claude/settings.json`.
 
+
+
+
+
+
+「「「「「「「「「「「「「「」」」」」」」待更新，因官方更新本项目需要升级，请稍后下载「「「「「「「「「「「「「「」」」」」」」
+
+
+
 Codex Switch 是一个很小的 macOS 工具，用来把 Codex 的官方 OpenAI 和自定义 API 并行配置到一起。它会注册自定义模型到 Codex 的模型目录，让用户直接在 Codex 里选择官方模型或自定义模型。它同时提供命令行和双击可用的 macOS App，每次保存都会备份配置，并保留官方 ChatGPT 登录态。
 
 它的核心特性是：Codex 侧不再强制“官方 / 自定义”二选一，而是把两类 provider 并行保留；Claude Code 侧继续支持官方 / 自定义路由配置。
