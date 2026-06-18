@@ -352,7 +352,7 @@ def custom_model_entry(model: str, display_name: str) -> dict[str, object]:
     }
 
 
-def base_catalog_models(home: Path, custom_model: str) -> list[dict[str, object]]:
+def load_official_models(home: Path) -> list[dict[str, object]]:
     source = home / "models_cache.json"
     if not source.exists():
         return []
@@ -363,15 +363,7 @@ def base_catalog_models(home: Path, custom_model: str) -> list[dict[str, object]
     models = data.get("models")
     if not isinstance(models, list):
         return []
-    output: list[dict[str, object]] = []
-    for item in models:
-        if not isinstance(item, dict):
-            continue
-        slug = item.get("slug")
-        if not isinstance(slug, str) or slug == custom_model:
-            continue
-        output.append(dict(item))
-    return output
+    return [dict(item) for item in models if isinstance(item, dict)]
 
 
 def custom_model_catalog(
@@ -380,13 +372,31 @@ def custom_model_catalog(
     display_name: str,
     additional_models: list[tuple[str, str]] | None = None,
 ) -> dict[str, object]:
-    models = base_catalog_models(home, model)
+    official = load_official_models(home)
+    official_by_slug: dict[str, dict[str, object]] = {}
+    for item in official:
+        slug = item.get("slug")
+        if isinstance(slug, str):
+            official_by_slug[slug] = item
+
+    models = list(official)
     seen = {item.get("slug") for item in models if isinstance(item.get("slug"), str)}
+
+    rename: dict[str, str] = {model: display_name}
     for slug, name in additional_models or []:
-        if slug and slug not in seen and slug != model:
-            models.append(custom_model_entry(slug, name or slug))
+        if slug:
+            rename[slug] = name or slug
+
+    for slug, name in rename.items():
+        if slug in seen:
+            for item in models:
+                if item.get("slug") == slug:
+                    item["display_name"] = name
+                    break
+        else:
+            models.append(custom_model_entry(slug, name))
             seen.add(slug)
-    models.append(custom_model_entry(model, display_name))
+
     return {"models": models}
 
 
