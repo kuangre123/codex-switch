@@ -1,15 +1,14 @@
 # Codex Switch
 
-> One tiny macOS app for switching Codex and Claude Code between official login and custom API routes.
+> One tiny macOS app for configuring Official OpenAI and custom API routes side by side in Codex, with Claude Code support too.
 
-Codex Switch is a lightweight helper for people who bounce between official login and custom API routes. For Codex, it can switch providers and keep the same thread context, so you can continue the current conversation after moving between Official OpenAI and a custom API. It also supports Claude Code by switching its official Claude login/custom API route through `~/.claude/settings.json`.
+Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it now keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's model catalog, and lets you choose the actual model inside Codex. It also supports Claude Code by updating its official Claude login/custom API route through `~/.claude/settings.json`.
 
-Codex Switch 是一个很小的 macOS 工具，用来在 Codex 的官方 OpenAI 登录模式和自定义 API 模式之间快速切换。切换后会尽量保留当前对话上下文，让你继续原来的 Codex 会话。它同时提供命令行和双击可用的 macOS App，每次切换都会备份配置，并保留官方 ChatGPT 登录态。
+Codex Switch 是一个很小的 macOS 工具，用来把 Codex 的官方 OpenAI 和自定义 API 并行配置到一起。它会注册自定义模型到 Codex 的模型目录，让用户直接在 Codex 里选择官方模型或自定义模型。它同时提供命令行和双击可用的 macOS App，每次保存都会备份配置，并保留官方 ChatGPT 登录态。
 
-它的核心特性是：切换官方 OpenAI / 自定义 API 后，当前 Codex thread 和上下文历史会尽量保留，你可以继续原来的对话，不用重新开一个会话。
+它的核心特性是：Codex 侧不再强制“官方 / 自定义”二选一，而是把两类 provider 并行保留；Claude Code 侧继续支持官方 / 自定义路由配置。
 
-官方 OpenAI 模式：使用 ChatGPT/OpenAI 登录，provider 是 openai。
-自定义 API 模式：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 custom。
+官方 OpenAI provider 使用 ChatGPT/OpenAI 登录。自定义 API provider 使用 API key，把请求转发到兼容 OpenAI 的接口，并通过模型目录显示为你自定义的名称，例如“我的模型”。
 
 ## Download App 下载 app：
 
@@ -25,31 +24,26 @@ Unzip it, move `Codex Switch.app` to `~/Applications` or `/Applications`, then o
 
 ## Why
 
-Codex users often need two modes:
+Codex can use multiple model providers, but configuring a custom provider by hand means editing `~/.codex/auth.json`, `~/.codex/config.toml`, and a model catalog JSON. Codex Switch turns that into one save action: official OpenAI stays available, the custom provider stays available, and Codex's own model picker decides which one to use.
 
-- **Official OpenAI**: use ChatGPT/OpenAI login, provider `openai`.
-- **Custom API**: use an API key and route model calls to an OpenAI-compatible endpoint, provider `custom`.
-
-Doing that by hand means editing `~/.codex/auth.json` and `~/.codex/config.toml` over and over. Codex Switch turns that into one click.
-
-中文：手动切换需要反复改 `~/.codex/auth.json` 和 `~/.codex/config.toml`。这个工具把它变成一次点击。
+中文：手动配置自定义 provider 需要改 `~/.codex/auth.json`、`~/.codex/config.toml` 和模型目录 JSON。这个工具把它变成一次保存：官方 OpenAI 保留，自定义 provider 也保留，最终由 Codex 自己的模型选择器来选。
 
 ## Features
 
-- One-click macOS app: switch Codex or Claude Code, status, settings.
-- Continue the same conversation after switching between Official OpenAI and a custom API.
+- One-click macOS app: configure Codex or Claude Code, status, settings.
+- Codex keeps Official OpenAI and custom API providers available side by side.
 - Claude Code support through the official `settings.json` `env` block.
 - CLI for scripting and quick terminal use.
 - Configurable custom API endpoint.
 - Default custom API endpoint: `https://jp.icodeeasy.cc`.
 - Automatic backups under `~/.codex/backups` and `~/.claude/backups`.
 - Preserves existing ChatGPT login tokens while custom mode uses a provider-level bearer token.
-- Provider Sync updates existing Codex thread metadata in place, so the current conversation can continue on the selected provider without forking into a new thread.
-- The macOS app automatically restarts Codex after switching so the running desktop app reloads the selected provider.
+- The macOS app restarts Codex after saving so the running app reloads provider and model catalog changes.
 - The toolbar automatically checks GitHub Releases and shows whether an update is available.
 - Official OpenAI mode hides custom API fields while keeping saved custom settings for later.
 - Official model can be selected from a preset menu or typed manually.
-- Codex custom models are registered with the official `model_catalog_json` config path, so typed custom model names can appear in Codex model metadata.
+- Codex custom providers are configured in parallel with Official OpenAI; users choose the actual model inside Codex.
+- Codex custom models are registered with the official `model_catalog_json` config path, including a custom display name.
 - Custom API keys can be replaced from the app using a secure field; leave it blank to keep the saved key.
 - The app bundles its matching CLI, so app and command behavior stay in sync after updates.
 - No Python dependencies beyond the standard library.
@@ -98,11 +92,12 @@ open "$HOME/Applications/Codex Switch.app"
 
 The app has three actions:
 
-- **Switch**: choose `Codex` or `Claude Code`, then `Custom API` or official mode.
+- **Codex**: save Official OpenAI and custom API side by side, then choose the model inside Codex.
+- **Claude Code**: choose `Custom API` or official mode.
 - **Status**: show current auth/provider/model.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
-When switching from the macOS app, existing Codex thread metadata is provider-synced in place, then Codex.app is gracefully quit and reopened so the running session reloads the selected provider. The thread id and conversation history stay in place, so you can continue the original conversation after the switch.
+When saving Codex settings from the macOS app, Official OpenAI remains the default provider and the custom provider is added beside it. Codex.app is gracefully quit and reopened so the running app reloads the provider list and model catalog. Existing Codex threads are not rewritten.
 
 Claude Code switching updates `~/.claude/settings.json` under `env`:
 
@@ -135,6 +130,17 @@ Set custom defaults:
 codex-switch config set \
   --local-base-url https://jp.icodeeasy.cc \
   --local-model gpt-5.5 \
+  --local-model-display-name "My Model" \
+  --official-model gpt-5.2-codex
+```
+
+Configure Codex official and custom providers in parallel:
+
+```bash
+codex-switch configure \
+  --base-url https://jp.icodeeasy.cc \
+  --custom-model gpt-5.5 \
+  --custom-model-name "My Model" \
   --official-model gpt-5.2-codex
 ```
 
@@ -147,7 +153,7 @@ codex-switch local --base-url https://your-endpoint.example.com --model your-mod
 Register a custom Codex model catalog without switching immediately:
 
 ```bash
-codex-switch register-model your-model
+codex-switch register-model your-model --name "My Model"
 ```
 
 Prompt for and save an API key:
@@ -156,14 +162,14 @@ Prompt for and save an API key:
 codex-switch local-login
 ```
 
-Sync existing thread metadata without using the app:
+Legacy switch commands are still available for older workflows:
 
 ```bash
 codex-switch local --migrate-latest
 codex-switch official --migrate-latest
 ```
 
-The macOS app also passes `--restart-codex` so Codex Desktop reloads the selected provider immediately after Provider Sync.
+The macOS app uses `codex-switch configure --restart-codex`, not the legacy provider switch commands.
 
 ## What It Changes
 
@@ -176,7 +182,7 @@ Codex Switch edits only the user Codex files:
 ~/.codex/codex-switch-model-catalog.json
 ```
 
-When Provider Sync is enabled by the app or `--migrate-latest`, it also updates existing Codex Desktop thread metadata:
+The legacy `local --migrate-latest` and `official --migrate-latest` commands can still update existing Codex Desktop thread metadata:
 
 ```text
 ~/.codex/sessions/**/rollout-*.jsonl
@@ -185,9 +191,9 @@ When Provider Sync is enabled by the app or `--migrate-latest`, it also updates 
 ~/.codex/state_*.sqlite
 ```
 
-This is what keeps the current conversation context attached to the newly selected provider.
+The current macOS app flow does not touch these thread metadata files.
 
-Backups are written before every switch:
+Backups are written before every save or legacy switch:
 
 ```text
 ~/.codex/backups/
@@ -209,7 +215,7 @@ models = ["your-model"]
 experimental_bearer_token = "sk-..."
 ```
 
-Official mode switches back to the official provider and removes the custom provider bearer token:
+The legacy official command switches back to the official provider and removes the custom provider bearer token:
 
 ```toml
 model_provider = "openai"

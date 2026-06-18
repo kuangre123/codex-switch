@@ -289,6 +289,27 @@ def rewrite_config_for_official(content: str, model: str) -> str:
     return "".join(line for _, lines in rewritten for line in lines)
 
 
+def rewrite_config_for_parallel(
+    content: str,
+    base_url: str,
+    official_model: str,
+    custom_model: str,
+    api_key: str,
+    catalog_path: Path,
+) -> str:
+    sections = split_toml_sections(content)
+    rewritten: list[tuple[str, list[str]]] = []
+    for section, lines in sections:
+        if section == "":
+            lines = set_key(lines, "model_provider", "openai")
+            lines = set_key(lines, "model", official_model)
+            lines = set_key(lines, "preferred_auth_method", "chatgpt")
+            lines = set_key(lines, "model_catalog_json", str(catalog_path))
+        rewritten.append((section, lines))
+    rewritten = ensure_custom_provider(rewritten, base_url, api_key, [custom_model])
+    return "".join(line for _, lines in rewritten for line in lines)
+
+
 def read_config(config_path: Path) -> str:
     if not config_path.exists():
         return ""
@@ -310,29 +331,77 @@ def model_catalog_path(home: Path) -> Path:
     return home / MODEL_CATALOG_NAME
 
 
-def custom_model_catalog(model: str) -> dict[str, object]:
+def custom_model_entry(model: str, display_name: str) -> dict[str, object]:
     return {
-        "models": [
-            {
-                "slug": model,
-                "display_name": model,
-                "description": "Custom model registered by Codex Switch",
-                "supported_in_api": True,
-                "context_window": 200000,
-                "max_output_tokens": 100000,
-                "supports_reasoning_summaries": True,
-                "supported_reasoning_levels": ["minimal", "low", "medium", "high"],
-                "default_reasoning_level": "medium",
-                "supports_parallel_tool_calls": True,
-                "input_modalities": ["text", "image"],
-                "output_modalities": ["text"],
-            }
-        ]
+        "slug": model,
+        "display_name": display_name,
+        "description": "Custom model registered by Codex Switch",
+        "supported_in_api": True,
+        "context_window": 200000,
+        "max_output_tokens": 100000,
+        "supports_reasoning_summaries": True,
+        "supported_reasoning_levels": ["minimal", "low", "medium", "high"],
+        "default_reasoning_level": "medium",
+        "supports_parallel_tool_calls": True,
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
     }
 
 
-def write_model_catalog(path: Path, model: str) -> None:
-    atomic_write(path, json.dumps(custom_model_catalog(model), indent=2, ensure_ascii=False) + "\n", 0o600)
+def base_catalog_models(home: Path, custom_model: str) -> list[dict[str, object]]:
+    source = home / "models_cache.json"
+    if not source.exists():
+        return []
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    models = data.get("models")
+    if not isinstance(models, list):
+        return []
+    output: list[dict[str, object]] = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str) or slug == custom_model:
+            continue
+        output.append(dict(item))
+    return output
+
+
+def custom_model_catalog(
+    home: Path,
+    model: str,
+    display_name: str,
+    additional_models: list[tuple[str, str]] | None = None,
+) -> dict[str, object]:
+    models = base_catalog_models(home, model)
+    seen = {item.get("slug") for item in models if isinstance(item.get("slug"), str)}
+    for slug, name in additional_models or []:
+        if slug and slug not in seen and slug != model:
+            models.append(custom_model_entry(slug, name or slug))
+            seen.add(slug)
+    models.append(custom_model_entry(model, display_name))
+    return {"models": models}
+
+
+def write_model_catalog(
+    path: Path,
+    model: str,
+    display_name: str | None = None,
+    additional_models: list[tuple[str, str]] | None = None,
+) -> None:
+    atomic_write(
+        path,
+        json.dumps(
+            custom_model_catalog(path.parent, model, display_name or model, additional_models),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        0o600,
+    )
 
 
 def rollout_files(home: Path) -> list[Path]:
@@ -561,6 +630,63 @@ def switch_official(args: argparse.Namespace) -> int:
     return 0
 
 
+def configure_codex(args: argparse.Namespace) -> int:
+    home = codex_home()
+    auth_path = home / "auth.json"
+    config_path = home / "config.toml"
+    catalog_path = model_catalog_path(home)
+    backup_dir = home / "backups"
+
+    auth = load_auth(auth_path)
+    state = load_state(home)
+    remember_current_auth(home, auth, state)
+    base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
+    custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_MODEL)
+    display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", custom_model)
+    official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    cached_key = state.get("local_api_key")
+    stdin_key = ""
+    if getattr(args, "api_key_stdin", False):
+        stdin_key = sys.stdin.readline().strip()
+        if not stdin_key:
+            raise SwitchError("API key from stdin was empty.")
+    api_key = stdin_key or args.api_key or str(auth.get("OPENAI_API_KEY") or "").strip()
+    if not api_key and isinstance(cached_key, str):
+        api_key = cached_key.strip()
+    if not api_key:
+        raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
+
+    backup_file(auth_path, backup_dir)
+    backup_file(config_path, backup_dir)
+    backup_file(catalog_path, backup_dir)
+    state["local_api_key"] = api_key
+    state["local_base_url"] = base_url
+    state["local_model"] = custom_model
+    state["local_model_display_name"] = display_name
+    state["official_model"] = official_model
+    save_state(home, state)
+
+    auth["OPENAI_API_KEY"] = api_key
+    auth["auth_mode"] = "chatgpt"
+    write_auth(auth_path, auth)
+    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
+    config = rewrite_config_for_parallel(read_config(config_path), base_url, official_model, custom_model, api_key, catalog_path)
+    atomic_write(config_path, config, 0o600)
+
+    print("Configured Codex official and custom providers in parallel.")
+    print(f"codex_home: {home}")
+    print("model_provider: openai")
+    print(f"official_model: {official_model}")
+    print(f"custom.base_url: {base_url}")
+    print(f"custom_model: {custom_model}")
+    print(f"custom_model_name: {display_name}")
+    print(f"model_catalog_json: {catalog_path}")
+    print(f"api_key: {redacted_key(api_key)}")
+    print(f"backup_dir: {backup_dir}")
+    restart_codex(args, home, "openai")
+    return 0
+
+
 def status(_: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
@@ -589,6 +715,7 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"codex_home: {home}")
     print(f"local_base_url: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_MODEL)}")
+    print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_MODEL))}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     return 0
 
@@ -599,6 +726,7 @@ def config_set(args: argparse.Namespace) -> int:
     updates = {
         "local_base_url": args.local_base_url,
         "local_model": args.local_model,
+        "local_model_display_name": args.local_model_display_name,
         "official_model": args.official_model,
     }
     for key, value in updates.items():
@@ -618,14 +746,19 @@ def codex_register_model(args: argparse.Namespace) -> int:
     model = args.model.strip()
     if not model:
         raise SwitchError("model cannot be empty")
+    display_name = args.name.strip() if args.name else model
+    if not display_name:
+        raise SwitchError("model display name cannot be empty")
     catalog_path = model_catalog_path(home)
     backup_file(catalog_path, home / "backups")
     state["local_model"] = model
+    state["local_model_display_name"] = display_name
     save_state(home, state)
-    write_model_catalog(catalog_path, model)
+    write_model_catalog(catalog_path, model, display_name)
     print("Registered custom Codex model catalog.")
     print(f"codex_home: {home}")
     print(f"model: {model}")
+    print(f"custom_model_name: {display_name}")
     print(f"model_catalog_json: {catalog_path}")
     print("Switch to custom API mode to write this path into config.toml.")
     return 0
@@ -846,11 +979,25 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser = config_subparsers.add_parser("set", help="Update saved switch defaults.")
     config_set_parser.add_argument("--local-base-url", help="Default local relay API base URL.")
     config_set_parser.add_argument("--local-model", help="Default local model.")
+    config_set_parser.add_argument("--local-model-display-name", help="Display name for the custom Codex model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.set_defaults(func=config_set)
 
+    configure = subparsers.add_parser("configure", help="Configure Codex official and custom providers in parallel.")
+    configure_key_source = configure.add_mutually_exclusive_group()
+    configure_key_source.add_argument("--api-key", help="API key for the custom provider. Omit to reuse existing key.")
+    configure_key_source.add_argument("--api-key-stdin", action="store_true", help="Read a replacement API key from stdin.")
+    configure.add_argument("--base-url", help=f"Custom API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
+    configure.add_argument("--model", help=argparse.SUPPRESS)
+    configure.add_argument("--custom-model", help=f"Custom model slug. Default: saved setting or {DEFAULT_MODEL}")
+    configure.add_argument("--custom-model-name", help="Display name for the custom model.")
+    configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
+    configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
+    configure.set_defaults(func=configure_codex)
+
     register_model_parser = subparsers.add_parser("register-model", help="Write a Codex model catalog for a custom model.")
     register_model_parser.add_argument("model", help="Custom model slug to expose to Codex.")
+    register_model_parser.add_argument("--name", help="Display name for the custom model.")
     register_model_parser.set_defaults(func=codex_register_model)
 
     claude_local = subparsers.add_parser("claude-local", help="Use Claude Code custom API mode.")

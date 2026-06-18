@@ -274,12 +274,54 @@ class CodexSwitchTests(unittest.TestCase):
             home = Path(temp) / ".codex"
             home.mkdir()
 
-            result = run_tool(home, "register-model", "my-custom-model")
+            result = run_tool(home, "register-model", "my-custom-model", "--name", "我的模型")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
             self.assertEqual(catalog["models"][0]["slug"], "my-custom-model")
+            self.assertEqual(catalog["models"][0]["display_name"], "我的模型")
             self.assertEqual(read_state(home)["local_model"], "my-custom-model")
+            self.assertEqual(read_state(home)["local_model_display_name"], "我的模型")
+
+    def test_configure_codex_keeps_official_and_custom_models_parallel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None}),
+                encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(
+                json.dumps({"models": [{"slug": "gpt-official", "display_name": "GPT Official"}]}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "configure",
+                "--api-key",
+                "sk-test-secret",
+                "--base-url",
+                "https://custom.example/v1",
+                "--custom-model",
+                "vendor/custom-model",
+                "--custom-model-name",
+                "我的模型",
+                "--official-model",
+                "gpt-official",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('model_provider = "openai"', config)
+            self.assertIn('model = "gpt-official"', config)
+            self.assertIn('model_catalog_json = "', config)
+            self.assertIn('base_url = "https://custom.example/v1"', config)
+            self.assertIn('models = ["vendor/custom-model"]', config)
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["slug"] for item in catalog["models"]], ["gpt-official", "vendor/custom-model"])
+            self.assertEqual(catalog["models"][1]["display_name"], "我的模型")
+            self.assertNotIn("Provider-synced", result.stdout)
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

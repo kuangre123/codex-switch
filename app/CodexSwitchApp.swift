@@ -74,6 +74,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var statusValues: [String: String] = [:]
     @Published var localBaseURL = ""
     @Published var localModel = ""
+    @Published var localModelDisplayName = ""
     @Published var replacementAPIKey = ""
     @Published var officialModel = ""
     @Published var output = ""
@@ -108,6 +109,7 @@ final class SwitchViewModel: ObservableObject {
                 let values = self.parse(config.output)
                 self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
                 self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
+                self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if status.status != 0 || config.status != 0 {
                     self.output = [status.output, config.output].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -169,10 +171,21 @@ final class SwitchViewModel: ObservableObject {
         switchFailed = false
         let baseURL = localBaseURL
         let local = localModel
+        let displayName = localModelDisplayName
         let replacementKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            if target == .codex {
+                self.configureCodex(
+                    baseURL: baseURL,
+                    customModel: local,
+                    displayName: displayName,
+                    officialModel: official,
+                    replacementKey: replacementKey
+                )
+                return
+            }
             let save = self.run(self.configSetArguments(for: target) + [
                 "--local-base-url", baseURL,
                 "--local-model", local,
@@ -206,6 +219,36 @@ final class SwitchViewModel: ObservableObject {
                 } else {
                     self.switchFailed = true
                 }
+            }
+        }
+    }
+
+    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, replacementKey: String) {
+        var arguments = [
+            "configure",
+            "--base-url", baseURL,
+            "--custom-model", customModel,
+            "--custom-model-name", displayName,
+            "--official-model", officialModel,
+            "--restart-codex",
+        ]
+        var switchInput: String?
+        if !replacementKey.isEmpty {
+            arguments.append("--api-key-stdin")
+            switchInput = replacementKey + "\n"
+        }
+        let configured = run(arguments, standardInput: switchInput)
+        let status = run(["status"])
+        DispatchQueue.main.async {
+            self.output = configured.output
+            self.statusValues = self.parse(status.output)
+            self.isBusy = false
+            self.completedTarget = .codex
+            if configured.status == 0 {
+                self.replacementAPIKey = ""
+                self.switchSucceeded = true
+            } else {
+                self.switchFailed = true
             }
         }
     }
@@ -337,7 +380,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex Switch")
                     .font(.largeTitle.bold())
-                Text(texts.text("切换 Codex 或 Claude Code 的 API 路由。", "Switch API routes for Codex or Claude Code."))
+                Text(texts.text("并行配置 Codex 的官方和自定义 API，也支持 Claude Code 路由。", "Configure Codex official and custom APIs side by side, with Claude Code route support."))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -367,7 +410,7 @@ struct ContentView: View {
     }
 
     private var settingsCard: some View {
-        GroupBox(texts.text("切换设置", "Switch Settings")) {
+        GroupBox(texts.text("配置设置", "Setup")) {
             VStack(alignment: .leading, spacing: 14) {
                 Picker(texts.text("目标工具", "Target Tool"), selection: $targetTool) {
                     Text("Codex").tag(SwitchTarget.codex)
@@ -375,19 +418,30 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
-                    Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
-                    Text(officialProviderTitle).tag(ProviderMode.official)
+                if targetTool == .claude {
+                    Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
+                        Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
+                        Text(officialProviderTitle).tag(ProviderMode.official)
+                    }
+                    .pickerStyle(.segmented)
+                } else {
+                    Text(texts.text("并行配置：官方 OpenAI 和自定义 API 会同时保留，之后在 Codex 里选择模型。", "Parallel setup: Official OpenAI and the custom API are kept together; choose the model inside Codex."))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
-                .pickerStyle(.segmented)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    if targetMode == .custom {
+                    if targetTool == .codex || targetMode == .custom {
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
-                        settingRow(texts.text("自定义模型", "Custom Model")) {
+                        settingRow(texts.text("自定义模型 ID", "Custom Model ID")) {
                             TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
+                        }
+                        if targetTool == .codex {
+                            settingRow(texts.text("显示名称", "Display Name")) {
+                                TextField(texts.text("我的模型", "My Model"), text: $model.localModelDisplayName)
+                            }
                         }
                         settingRow(texts.text("新 API Key", "New API Key")) {
                             SecureField(apiKeyPlaceholder, text: $model.replacementAPIKey)
@@ -416,7 +470,7 @@ struct ContentView: View {
                 Button {
                     model.switchProvider(to: targetMode, target: targetTool)
                 } label: {
-                    Label(texts.text("确认切换", "Confirm Switch"), systemImage: "arrow.triangle.2.circlepath")
+                    Label(primaryButtonTitle, systemImage: targetTool == .codex ? "square.and.arrow.down" : "arrow.triangle.2.circlepath")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -428,9 +482,15 @@ struct ContentView: View {
     }
 
     private var progressText: String {
-        targetTool == .claude
-            ? texts.text("正在切换 Claude Code 配置…", "Switching Claude Code settings…")
-            : texts.text("正在切换并重启 Codex…", "Switching and restarting Codex…")
+        targetTool == .codex
+            ? texts.text("正在保存并重启 Codex…", "Saving and restarting Codex…")
+            : texts.text("正在切换 Claude Code 配置…", "Switching Claude Code settings…")
+    }
+
+    private var primaryButtonTitle: String {
+        targetTool == .codex
+            ? texts.text("保存配置并重启 Codex", "Save Setup and Restart Codex")
+            : texts.text("保存配置", "Save Settings")
     }
 
     private var officialProviderTitle: String {
@@ -463,8 +523,8 @@ struct ContentView: View {
                     .foregroundStyle(model.switchSucceeded ? Color.green : Color.red)
 
                 Text(model.switchSucceeded
-                    ? texts.text("切换成功", "Switch Successful")
-                    : texts.text("切换失败", "Switch Failed"))
+                    ? texts.text("操作成功", "Success")
+                    : texts.text("操作失败", "Failed"))
                     .font(.title2.bold())
 
                 Text(resultMessage)
@@ -498,9 +558,7 @@ struct ContentView: View {
                 ? texts.text("已切换 Claude Code 到自定义 API。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to the custom API. Restart Claude Code terminal sessions to apply it.")
                 : texts.text("已切换 Claude Code 到官方 Claude。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to Official Claude. Restart Claude Code terminal sessions to apply it.")
         }
-        return model.completedMode == .custom
-            ? texts.text("已切换到自定义 API，并已重启 Codex 让设置生效。", "Switched to the custom API and restarted Codex to apply it.")
-            : texts.text("已切换到官方 OpenAI，并已重启 Codex 让设置生效。", "Switched to Official OpenAI and restarted Codex to apply it.")
+        return texts.text("已保存官方 OpenAI 和自定义 API 的并行配置，并已重启 Codex。请在 Codex 的模型选择器里选择需要的模型。", "Saved the parallel Official OpenAI and custom API setup, then restarted Codex. Choose the model in Codex's model picker.")
     }
 
     private var apiKeyPlaceholder: String {

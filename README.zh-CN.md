@@ -1,11 +1,11 @@
 # Codex Switch
 
-> 一个很小的 macOS 工具，用来一键切换 Codex 和 Claude Code 的官方登录 / 自定义 API。
+> 一个很小的 macOS 工具，用来把 Codex 官方 OpenAI 和自定义 API 并行配置到一起，也支持 Claude Code。
 
-Codex Switch 适合经常在两种模式之间切换的人。它的核心特性是：切换官方 OpenAI / 自定义 API 后，当前 Codex thread 和上下文历史会尽量保留，你可以继续原来的对话，不用重新开一个会话。现在也支持 Claude Code，通过官方支持的 `~/.claude/settings.json` 的 `env` 配置切换官方 Claude / 自定义 Claude 兼容 API。
+Codex Switch 适合需要同时保留官方模型和自定义 API 的人。Codex 侧现在不再做“官方 / 自定义”二选一切换，而是把 Official OpenAI provider 和 custom provider 并行写入配置，并把自定义模型注册到 Codex 的模型目录里。用户之后直接在 Codex 里选择模型即可。它也支持 Claude Code，通过官方支持的 `~/.claude/settings.json` 的 `env` 配置切换官方 Claude / 自定义 Claude 兼容 API。
 
-- **官方 OpenAI 模式**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`。
-- **自定义 API 模式**：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 `custom`。
+- **官方 OpenAI provider**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`。
+- **自定义 API provider**：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 `custom`，模型可以显示成你自定义的名字，比如“我的模型”。
 
 默认自定义 API 地址是：
 
@@ -57,7 +57,7 @@ codex-switch claude-local
 codex-switch claude-official
 ```
 
-通过 App 切换模式时，会自动同步当前会话上下文并重启 Codex，让你回到同一条对话里继续使用新的 provider。
+Codex 现在不是“切换官方/自定义”二选一，而是并行配置：官方 OpenAI 和自定义 API 会同时写入配置，App 保存后重启 Codex，之后你在 Codex 自己的模型选择器里选择要用的模型。
 
 切换 Claude Code 时，App 会修改 `~/.claude/settings.json` 里的 `env`：
 
@@ -79,9 +79,9 @@ App 启动后会自动检查 GitHub Releases，右上角会显示“已是最新
 
 官方模型支持从预设菜单选择，也可以手动输入新的模型名。
 
-Codex 自定义模型会按官方 `model_catalog_json` 配置写入 `~/.codex/codex-switch-model-catalog.json`，不是只改一个模型字符串。这样手动输入的自定义模型也能进入 Codex 的模型元数据。
+Codex 自定义模型会按官方 `model_catalog_json` 配置写入 `~/.codex/codex-switch-model-catalog.json`，不是只改一个模型字符串。模型 ID 用于 API 请求，显示名称可自定义，比如叫“我的模型”。
 
-自定义 API 模式提供“新 API Key”安全输入框：留空会继续使用现有 Key，输入新 Key 后会在切换时更新，界面不会回显明文。
+自定义 API 提供“新 API Key”安全输入框：留空会继续使用现有 Key，输入新 Key 后会在保存时更新，界面不会回显明文。
 
 App 内置与自身版本匹配的 CLI，更新 App 后不会再因为外部 CLI 版本较旧而参数不兼容。
 
@@ -89,14 +89,19 @@ App 内置与自身版本匹配的 CLI，更新 App 后不会再因为外部 CLI
 
 ```bash
 codex-switch config set --local-base-url https://your-endpoint.example.com
-codex-switch register-model your-model
+codex-switch configure \
+  --base-url https://your-endpoint.example.com \
+  --custom-model your-model-id \
+  --custom-model-name "我的模型" \
+  --official-model gpt-5.2-codex
+codex-switch register-model your-model-id --name "我的模型"
 ```
 
 或者在 App 里点 **Settings** 修改。
 
 ## 安全说明
 
-每次切换前都会备份：
+每次保存配置或使用旧切换命令前都会备份：
 
 ```text
 ~/.codex/backups/
@@ -109,11 +114,11 @@ Codex 自定义模型目录文件：
 ~/.codex/codex-switch-model-catalog.json
 ```
 
-切换时会保留现有 `auth.json` 里的官方 ChatGPT 登录态。自定义 API Key 会写入 custom provider 的 `experimental_bearer_token`，这样自定义 API 可以用，同时官方登录不会被清掉。
+保存时会保留现有 `auth.json` 里的官方 ChatGPT 登录态。自定义 API Key 会写入 custom provider 的 `experimental_bearer_token`，这样自定义 API 可以用，同时官方登录不会被清掉。
 
-通过 macOS App 切换时，工具会先做 Provider Sync：原地更新已有会话 rollout 和 Codex Desktop sqlite 里的 `model_provider`，所以当前 thread id 和上下文历史都会保留，不需要分叉到新会话。随后 App 会自动优雅重启 Codex，让正在运行的 Codex Desktop 重新加载新的 provider。
+通过 macOS App 配置 Codex 时，工具不再做 Provider Sync，也不会把现有 thread 强行改到某个 provider。它只保存官方和自定义 provider 的并行配置，然后重启 Codex 让模型目录重新加载。
 
-如果只用命令行，也可以手动同步已有会话元数据：
+旧版切换命令仍然保留，老工作流如果需要也可以手动同步已有会话元数据：
 
 ```bash
 codex-switch local --migrate-latest
