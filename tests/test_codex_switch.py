@@ -292,7 +292,19 @@ class CodexSwitchTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (home / "models_cache.json").write_text(
-                json.dumps({"models": [{"slug": "gpt-official", "display_name": "GPT Official"}]}),
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-official",
+                                "display_name": "GPT Official",
+                                "shell_type": "shell_command",
+                                "model_messages": {"instructions_template": "x"},
+                                "upgrade": {"model": "gpt-next"},
+                            }
+                        ]
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -320,7 +332,15 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('models = ["vendor/custom-model"]', config)
             catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
             self.assertEqual([item["slug"] for item in catalog["models"]], ["gpt-official", "vendor/custom-model"])
-            self.assertEqual(catalog["models"][1]["display_name"], "我的模型")
+            custom_entry = catalog["models"][1]
+            self.assertEqual(custom_entry["display_name"], "我的模型")
+            # The custom entry must inherit required fields from the official template
+            # (Codex rejects the catalog otherwise) but must not carry an upgrade path.
+            self.assertEqual(custom_entry["shell_type"], "shell_command")
+            self.assertIn("model_messages", custom_entry)
+            self.assertNotIn("upgrade", custom_entry)
+            # Official entry is untouched.
+            self.assertEqual(catalog["models"][0]["display_name"], "GPT Official")
             self.assertNotIn("Provider-synced", result.stdout)
 
     def test_configure_codex_rejects_duplicate_official_custom_model_id(self) -> None:

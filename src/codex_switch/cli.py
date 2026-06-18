@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import getpass
 import json
 import os
@@ -332,24 +333,57 @@ def model_catalog_path(home: Path) -> Path:
     return home / MODEL_CATALOG_NAME
 
 
-def custom_model_entry(model: str, display_name: str) -> dict[str, object]:
+def custom_model_entry(
+    model: str,
+    display_name: str,
+    template: dict[str, object] | None = None,
+) -> dict[str, object]:
+    # Prefer cloning a real official model so the entry carries every field
+    # Codex requires (shell_type, model_messages, base_instructions, etc.).
+    if template is not None:
+        entry = copy.deepcopy(template)
+        entry["slug"] = model
+        entry["display_name"] = display_name
+        entry["description"] = "Custom model registered by Codex Switch"
+        # A custom endpoint should not advertise an upgrade to an official model.
+        entry.pop("upgrade", None)
+        return entry
     return {
         "slug": model,
         "display_name": display_name,
         "description": "Custom model registered by Codex Switch",
+        "shell_type": "shell_command",
+        "visibility": "list",
         "supported_in_api": True,
-        "context_window": 200000,
-        "max_output_tokens": 100000,
+        "priority": 1,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
+        "availability_nux": None,
+        "upgrade": None,
         "supports_reasoning_summaries": True,
+        "default_reasoning_summary": "none",
+        "support_verbosity": True,
+        "default_verbosity": "medium",
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "supports_parallel_tool_calls": True,
+        "supports_image_detail_original": True,
+        "context_window": 200000,
+        "max_context_window": 200000,
+        "max_output_tokens": 100000,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
         "supported_reasoning_levels": [
             {"effort": "low", "description": "Fast responses with lighter reasoning"},
             {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
             {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         ],
         "default_reasoning_level": "medium",
-        "supports_parallel_tool_calls": True,
         "input_modalities": ["text", "image"],
         "output_modalities": ["text"],
+        "supports_search_tool": True,
+        "use_responses_lite": False,
     }
 
 
@@ -394,13 +428,23 @@ def custom_model_catalog(
     # genuinely custom models (slugs not present in the official catalog) are
     # appended and may carry a user-defined display name.
     models = load_official_models(home)
-    seen = {item.get("slug") for item in models if isinstance(item.get("slug"), str)}
+    by_slug = {item.get("slug"): item for item in models if isinstance(item.get("slug"), str)}
+    seen = set(by_slug)
+
+    # Clone a real official model so custom entries inherit every required field.
+    template: dict[str, object] | None = None
+    for slug, _ in additional_models or []:
+        if slug in by_slug:
+            template = by_slug[slug]
+            break
+    if template is None and models:
+        template = models[0]
 
     extras = list(additional_models or [])
     extras.append((model, display_name))
     for slug, name in extras:
         if slug and slug not in seen:
-            models.append(custom_model_entry(slug, name or slug))
+            models.append(custom_model_entry(slug, name or slug, template))
             seen.add(slug)
 
     return {"models": models}
