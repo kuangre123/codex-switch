@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import getpass
 import json
 import os
@@ -24,14 +23,13 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
-DEFAULT_CUSTOM_MODEL = "my-gpt-5.5"
+DEFAULT_CUSTOM_MODEL = DEFAULT_MODEL
 CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
 RESTART_SETTLE_SECONDS = 3.0
 CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
 CUSTOM_PROVIDER_ID = "custom"
-MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
 
 
 class SwitchError(RuntimeError):
@@ -262,7 +260,7 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str,
     return updated
 
 
-def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path) -> str:
+def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
     for section, lines in sections:
@@ -270,7 +268,7 @@ def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: s
             lines = set_key(lines, "model_provider", CUSTOM_PROVIDER_ID)
             lines = set_key(lines, "model", model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
-            lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            lines = remove_key(lines, "model_catalog_json")
         rewritten.append((section, lines))
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [model])
     return "".join(line for _, lines in rewritten for line in lines)
@@ -297,7 +295,6 @@ def rewrite_config_for_parallel(
     official_model: str,
     custom_model: str,
     api_key: str,
-    catalog_path: Path,
 ) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
@@ -306,7 +303,7 @@ def rewrite_config_for_parallel(
             lines = set_key(lines, "model_provider", "openai")
             lines = set_key(lines, "model", official_model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
-            lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            lines = remove_key(lines, "model_catalog_json")
         rewritten.append((section, lines))
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [custom_model])
     return "".join(line for _, lines in rewritten for line in lines)
@@ -327,145 +324,6 @@ def configured_provider(content: str) -> str:
             if match:
                 return match.group(1)
     return "openai"
-
-
-def model_catalog_path(home: Path) -> Path:
-    return home / MODEL_CATALOG_NAME
-
-
-def custom_model_entry(
-    model: str,
-    display_name: str,
-    template: dict[str, object] | None = None,
-) -> dict[str, object]:
-    # Prefer cloning a real official model so the entry carries every field
-    # Codex requires (shell_type, model_messages, base_instructions, etc.).
-    if template is not None:
-        entry = copy.deepcopy(template)
-        entry["slug"] = model
-        entry["display_name"] = display_name
-        entry["description"] = "Custom model registered by Codex Switch"
-        # A custom endpoint should not advertise an upgrade to an official model.
-        entry.pop("upgrade", None)
-        return entry
-    return {
-        "slug": model,
-        "display_name": display_name,
-        "description": "Custom model registered by Codex Switch",
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "supported_in_api": True,
-        "priority": 1,
-        "additional_speed_tiers": [],
-        "service_tiers": [],
-        "availability_nux": None,
-        "upgrade": None,
-        "supports_reasoning_summaries": True,
-        "default_reasoning_summary": "none",
-        "support_verbosity": True,
-        "default_verbosity": "medium",
-        "apply_patch_tool_type": "freeform",
-        "web_search_tool_type": "text_and_image",
-        "truncation_policy": {"mode": "tokens", "limit": 10000},
-        "supports_parallel_tool_calls": True,
-        "supports_image_detail_original": True,
-        "context_window": 200000,
-        "max_context_window": 200000,
-        "max_output_tokens": 100000,
-        "effective_context_window_percent": 95,
-        "experimental_supported_tools": [],
-        "supported_reasoning_levels": [
-            {"effort": "low", "description": "Fast responses with lighter reasoning"},
-            {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
-            {"effort": "high", "description": "Greater reasoning depth for complex problems"},
-        ],
-        "default_reasoning_level": "medium",
-        "input_modalities": ["text", "image"],
-        "output_modalities": ["text"],
-        "supports_search_tool": True,
-        "use_responses_lite": False,
-    }
-
-
-def load_official_models(home: Path) -> list[dict[str, object]]:
-    source = home / "models_cache.json"
-    if not source.exists():
-        return []
-    try:
-        data = json.loads(source.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    models = data.get("models")
-    if not isinstance(models, list):
-        return []
-    return [dict(item) for item in models if isinstance(item, dict)]
-
-
-def official_model_slugs(home: Path) -> set[str]:
-    return {item["slug"] for item in load_official_models(home) if isinstance(item.get("slug"), str)}
-
-
-def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: str | None = None) -> None:
-    reserved = official_model_slugs(home)
-    if official_model:
-        reserved.add(official_model)
-    if custom_model in reserved:
-        examples = "my-gpt-5.5 or jp/gpt-5.5"
-        raise SwitchError(
-            "Custom model ID must be different from official Codex model IDs. "
-            f"`{custom_model}` is already an official model slug, so Codex will de-duplicate it and the custom display name will not appear. "
-            f"Use a unique ID such as {examples}, and make sure your custom API or proxy accepts that model ID."
-        )
-
-
-def custom_model_catalog(
-    home: Path,
-    model: str,
-    display_name: str,
-    additional_models: list[tuple[str, str]] | None = None,
-) -> dict[str, object]:
-    # Official models are kept verbatim with their original display names; only
-    # genuinely custom models (slugs not present in the official catalog) are
-    # appended and may carry a user-defined display name.
-    models = load_official_models(home)
-    by_slug = {item.get("slug"): item for item in models if isinstance(item.get("slug"), str)}
-    seen = set(by_slug)
-
-    # Clone a real official model so custom entries inherit every required field.
-    template: dict[str, object] | None = None
-    for slug, _ in additional_models or []:
-        if slug in by_slug:
-            template = by_slug[slug]
-            break
-    if template is None and models:
-        template = models[0]
-
-    extras = list(additional_models or [])
-    extras.append((model, display_name))
-    for slug, name in extras:
-        if slug and slug not in seen:
-            models.append(custom_model_entry(slug, name or slug, template))
-            seen.add(slug)
-
-    return {"models": models}
-
-
-def write_model_catalog(
-    path: Path,
-    model: str,
-    display_name: str | None = None,
-    additional_models: list[tuple[str, str]] | None = None,
-) -> None:
-    atomic_write(
-        path,
-        json.dumps(
-            custom_model_catalog(path.parent, model, display_name or model, additional_models),
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        0o600,
-    )
 
 
 def rollout_files(home: Path) -> list[Path]:
@@ -619,7 +477,6 @@ def switch_local(args: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
     config_path = home / "config.toml"
-    catalog_path = model_catalog_path(home)
     backup_dir = home / "backups"
 
     auth = load_auth(auth_path)
@@ -642,20 +499,17 @@ def switch_local(args: argparse.Namespace) -> int:
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
-    backup_file(catalog_path, backup_dir)
     save_state(home, state)
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    write_model_catalog(catalog_path, model)
-    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, catalog_path)
+    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key)
     atomic_write(config_path, config, 0o600)
 
     print("Switched Codex to local relay API mode.")
     print(f"codex_home: {home}")
     print(f"base_url: {base_url}")
     print(f"model: {model}")
-    print(f"model_catalog_json: {catalog_path}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
@@ -688,7 +542,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print("model_provider: openai")
     print(f"model: {model}")
     print(f"backup_dir: {backup_dir}")
-    print("Existing ChatGPT login tokens, custom API key, and custom model catalog were preserved.")
+    print("Existing ChatGPT login tokens and custom API key were preserved.")
     print_migration(home, "openai", model, args)
     restart_codex(args, home, "openai")
     return 0
@@ -698,7 +552,6 @@ def configure_codex(args: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
     config_path = home / "config.toml"
-    catalog_path = model_catalog_path(home)
     backup_dir = home / "backups"
 
     auth = load_auth(auth_path)
@@ -708,7 +561,6 @@ def configure_codex(args: argparse.Namespace) -> int:
     custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_CUSTOM_MODEL)
     display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", custom_model)
     official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
-    ensure_distinct_custom_model(home, custom_model, official_model)
     cached_key = state.get("local_api_key")
     stdin_key = ""
     if getattr(args, "api_key_stdin", False):
@@ -723,7 +575,6 @@ def configure_codex(args: argparse.Namespace) -> int:
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
-    backup_file(catalog_path, backup_dir)
     state["local_api_key"] = api_key
     state["local_base_url"] = base_url
     state["local_model"] = custom_model
@@ -734,8 +585,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
-    config = rewrite_config_for_parallel(read_config(config_path), base_url, official_model, custom_model, api_key, catalog_path)
+    config = rewrite_config_for_parallel(read_config(config_path), base_url, official_model, custom_model, api_key)
     atomic_write(config_path, config, 0o600)
 
     print("Configured Codex official and custom providers in parallel.")
@@ -745,7 +595,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     print(f"custom.base_url: {base_url}")
     print(f"custom_model: {custom_model}")
     print(f"custom_model_name: {display_name}")
-    print(f"model_catalog_json: {catalog_path}")
+    print("model_catalog_json: disabled")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     restart_codex(args, home, "openai")
@@ -762,7 +612,7 @@ def status(_: argparse.Namespace) -> int:
     print(f"codex_home: {home}")
     print(f"auth_mode: {auth.get('auth_mode') or '(missing)'}")
     print(f"api_key: {redacted_key(auth.get('OPENAI_API_KEY') if isinstance(auth.get('OPENAI_API_KEY'), str) else None)}")
-    for key in ("model_provider", "model", "preferred_auth_method", "model_catalog_json"):
+    for key in ("model_provider", "model", "preferred_auth_method"):
         match = re.search(rf"^{re.escape(key)}\s*=\s*\"([^\"]*)\"", config, re.MULTILINE)
         print(f"{key}: {match.group(1) if match else '(missing)'}")
     base_url = re.search(
@@ -811,22 +661,18 @@ def codex_register_model(args: argparse.Namespace) -> int:
     model = args.model.strip()
     if not model:
         raise SwitchError("model cannot be empty")
-    ensure_distinct_custom_model(home, model)
     display_name = args.name.strip() if args.name else model
     if not display_name:
         raise SwitchError("model display name cannot be empty")
-    catalog_path = model_catalog_path(home)
-    backup_file(catalog_path, home / "backups")
     state["local_model"] = model
     state["local_model_display_name"] = display_name
     save_state(home, state)
-    write_model_catalog(catalog_path, model, display_name)
-    print("Registered custom Codex model catalog.")
+    print("Saved custom Codex model setting.")
     print(f"codex_home: {home}")
     print(f"model: {model}")
     print(f"custom_model_name: {display_name}")
-    print(f"model_catalog_json: {catalog_path}")
-    print("Switch to custom API mode to write this path into config.toml.")
+    print("model_catalog_json: disabled")
+    print("Run configure or local to write the custom provider into config.toml.")
     return 0
 
 
@@ -1055,15 +901,15 @@ def build_parser() -> argparse.ArgumentParser:
     configure_key_source.add_argument("--api-key-stdin", action="store_true", help="Read a replacement API key from stdin.")
     configure.add_argument("--base-url", help=f"Custom API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
     configure.add_argument("--model", help=argparse.SUPPRESS)
-    configure.add_argument("--custom-model", help=f"Custom model slug. Must be different from official Codex model IDs. Default: saved setting or {DEFAULT_CUSTOM_MODEL}")
-    configure.add_argument("--custom-model-name", help="Display name for the custom model.")
+    configure.add_argument("--custom-model", help=f"Custom provider model ID. Default: saved setting or {DEFAULT_CUSTOM_MODEL}")
+    configure.add_argument("--custom-model-name", help="Stored label for this setting. It is not written to Codex's model catalog.")
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
     configure.set_defaults(func=configure_codex)
 
-    register_model_parser = subparsers.add_parser("register-model", help="Write a Codex model catalog for a custom model.")
-    register_model_parser.add_argument("model", help="Custom model slug to expose to Codex.")
-    register_model_parser.add_argument("--name", help="Display name for the custom model.")
+    register_model_parser = subparsers.add_parser("register-model", help="Save a Codex custom model setting without writing a model catalog.")
+    register_model_parser.add_argument("model", help="Custom provider model ID.")
+    register_model_parser.add_argument("--name", help="Stored label for the custom model setting.")
     register_model_parser.set_defaults(func=codex_register_model)
 
     claude_local = subparsers.add_parser("claude-local", help="Use Claude Code custom API mode.")
