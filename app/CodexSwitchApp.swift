@@ -108,7 +108,7 @@ final class SwitchViewModel: ObservableObject {
                 self.statusValues = self.parse(status.output)
                 let values = self.parse(config.output)
                 self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
-                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
+                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5")
                 self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if status.status != 0 || config.status != 0 {
@@ -171,6 +171,7 @@ final class SwitchViewModel: ObservableObject {
         switchFailed = false
         let baseURL = localBaseURL
         let local = localModel
+        let displayName = localModelDisplayName
         let replacementKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -179,6 +180,7 @@ final class SwitchViewModel: ObservableObject {
                 self.configureCodex(
                     baseURL: baseURL,
                     customModel: local,
+                    displayName: displayName,
                     officialModel: official,
                     replacementKey: replacementKey
                 )
@@ -221,11 +223,12 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
-    private func configureCodex(baseURL: String, customModel: String, officialModel: String, replacementKey: String) {
+    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, replacementKey: String) {
         var arguments = [
             "configure",
             "--base-url", baseURL,
             "--custom-model", customModel,
+            "--custom-model-name", displayName,
             "--official-model", officialModel,
             "--restart-codex",
         ]
@@ -396,6 +399,9 @@ struct ContentView: View {
                 statusRow(texts.text("Provider", "Provider"), model.statusValues["model_provider"] ?? "-")
                 statusRow(texts.text("模型", "Model"), model.statusValues["model"] ?? "-")
                 statusRow(texts.text("自定义地址", "Custom URL"), model.statusValues["custom.base_url"] ?? "-")
+                if targetTool == .codex {
+                    statusRow(texts.text("模型目录", "Model Catalog"), model.statusValues["model_catalog_json"] ?? "-")
+                }
                 statusRow(texts.text("API Key", "API Key"), model.statusValues["api_key"] ?? "-")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -419,7 +425,7 @@ struct ContentView: View {
                     }
                     .pickerStyle(.segmented)
                 } else {
-                    Text(texts.text("并行配置：官方 OpenAI 和自定义 API provider 会同时保留；不会写入实验性的模型目录。", "Parallel setup: Official OpenAI and the custom API provider are kept together; the experimental model catalog is not written."))
+                    Text(texts.text("并行配置：官方 OpenAI 和自定义 API 会同时保留，之后在 Codex 里选择模型。", "Parallel setup: Official OpenAI and the custom API are kept together; choose the model inside Codex."))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -431,15 +437,20 @@ struct ContentView: View {
                         }
                         settingRow(texts.text("自定义模型 ID", "Custom Model ID")) {
                             VStack(alignment: .leading, spacing: 4) {
-                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
+                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5", text: $model.localModel)
                                 if targetTool == .codex {
                                     Text(texts.text(
-                                        "建议使用自定义接口实际支持的模型 ID；当前版本不会写入模型目录，避免影响会话恢复。",
-                                        "Use a model ID supported by your custom endpoint; this version does not write the model catalog to avoid breaking session restore."
+                                        "必须和官方模型 ID 不同，例如 my-gpt-5.5；否则 Codex 会按 ID 去重，看不到显示名称。",
+                                        "Must be different from official model IDs, such as my-gpt-5.5; otherwise Codex de-duplicates it and the display name will not appear."
                                     ))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(model.localModel == model.officialModel || officialModelOptions.contains(model.localModel) ? Color.red : Color.secondary)
                                 }
+                            }
+                        }
+                        if targetTool == .codex {
+                            settingRow(texts.text("显示名称", "Display Name")) {
+                                TextField(texts.text("我的模型", "My Model"), text: $model.localModelDisplayName)
                             }
                         }
                         settingRow(texts.text("新 API Key", "New API Key")) {

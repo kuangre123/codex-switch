@@ -179,12 +179,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('requires_openai_auth = true', config)
             self.assertIn('wire_api = "responses"', config)
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
+            self.assertIn('model_catalog_json = "', config)
             self.assertIn('models = ["gpt-5.5"]', config)
             self.assertIn('[projects."/Users/sirchen/Documents/aimashi"]', config)
-            # The experimental model catalog is no longer written, so it must not
-            # leak into config.toml or create a catalog file.
-            self.assertNotIn('model_catalog_json', config)
-            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["models"][0]["slug"], "gpt-5.5")
+            self.assertEqual(catalog["models"][0]["display_name"], "gpt-5.5")
             self.assertTrue((home / "backups").is_dir())
             self.assertTrue(any(p.name.startswith("config.toml.") for p in (home / "backups").iterdir()))
             self.assertEqual(stat.S_IMODE((home / "auth.json").stat().st_mode), 0o600)
@@ -269,7 +269,7 @@ class CodexSwitchTests(unittest.TestCase):
                 (home / "config.toml").read_text(encoding="utf-8"),
             )
 
-    def test_register_model_saves_custom_model_setting(self) -> None:
+    def test_register_model_writes_codex_model_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             home.mkdir()
@@ -277,8 +277,9 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "register-model", "my-custom-model", "--name", "我的模型")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            # The experimental model catalog is no longer written.
-            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["models"][0]["slug"], "my-custom-model")
+            self.assertEqual(catalog["models"][0]["display_name"], "我的模型")
             self.assertEqual(read_state(home)["local_model"], "my-custom-model")
             self.assertEqual(read_state(home)["local_model_display_name"], "我的模型")
 
@@ -326,13 +327,23 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "openai"', config)
             self.assertIn('model = "gpt-official"', config)
-            self.assertNotIn("model_catalog_json", config)
+            self.assertIn('model_catalog_json = "', config)
             self.assertIn('base_url = "https://custom.example/v1"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
-            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["slug"] for item in catalog["models"]], ["gpt-official", "vendor/custom-model"])
+            custom_entry = catalog["models"][1]
+            self.assertEqual(custom_entry["display_name"], "我的模型")
+            # The custom entry must inherit required fields from the official template
+            # (Codex rejects the catalog otherwise) but must not carry an upgrade path.
+            self.assertEqual(custom_entry["shell_type"], "shell_command")
+            self.assertIn("model_messages", custom_entry)
+            self.assertNotIn("upgrade", custom_entry)
+            # Official entry is untouched.
+            self.assertEqual(catalog["models"][0]["display_name"], "GPT Official")
             self.assertNotIn("Provider-synced", result.stdout)
 
-    def test_configure_codex_allows_duplicate_official_custom_model_id_without_catalog(self) -> None:
+    def test_configure_codex_rejects_duplicate_official_custom_model_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -358,11 +369,9 @@ class CodexSwitchTests(unittest.TestCase):
                 "gpt-5.5",
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            config = (home / "config.toml").read_text(encoding="utf-8")
-            self.assertIn('model = "gpt-5.5"', config)
-            self.assertIn('models = ["gpt-5.5"]', config)
-            self.assertNotIn("model_catalog_json", config)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Custom model ID must be different", result.stderr)
+            self.assertIn("display name will not appear", result.stderr)
             self.assertFalse((home / "codex-switch-model-catalog.json").exists())
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
