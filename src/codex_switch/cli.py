@@ -382,10 +382,11 @@ def custom_model_catalog(
     models = list(official)
     seen = {item.get("slug") for item in models if isinstance(item.get("slug"), str)}
 
-    rename: dict[str, str] = {model: display_name}
+    rename: dict[str, str] = {}
     for slug, name in additional_models or []:
         if slug:
             rename[slug] = name or slug
+    rename[model] = display_name
 
     for slug, name in rename.items():
         if slug in seen:
