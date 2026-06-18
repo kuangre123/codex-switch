@@ -372,30 +372,17 @@ def custom_model_catalog(
     display_name: str,
     additional_models: list[tuple[str, str]] | None = None,
 ) -> dict[str, object]:
-    official = load_official_models(home)
-    official_by_slug: dict[str, dict[str, object]] = {}
-    for item in official:
-        slug = item.get("slug")
-        if isinstance(slug, str):
-            official_by_slug[slug] = item
-
-    models = list(official)
+    # Official models are kept verbatim with their original display names; only
+    # genuinely custom models (slugs not present in the official catalog) are
+    # appended and may carry a user-defined display name.
+    models = load_official_models(home)
     seen = {item.get("slug") for item in models if isinstance(item.get("slug"), str)}
 
-    rename: dict[str, str] = {}
-    for slug, name in additional_models or []:
-        if slug:
-            rename[slug] = name or slug
-    rename[model] = display_name
-
-    for slug, name in rename.items():
-        if slug in seen:
-            for item in models:
-                if item.get("slug") == slug:
-                    item["display_name"] = name
-                    break
-        else:
-            models.append(custom_model_entry(slug, name))
+    extras = list(additional_models or [])
+    extras.append((model, display_name))
+    for slug, name in extras:
+        if slug and slug not in seen:
+            models.append(custom_model_entry(slug, name or slug))
             seen.add(slug)
 
     return {"models": models}
