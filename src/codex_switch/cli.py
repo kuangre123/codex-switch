@@ -270,6 +270,27 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str,
     return updated
 
 
+def ensure_profile(
+    sections: list[tuple[str, list[str]]], profile: str, settings: dict[str, str]
+) -> list[tuple[str, list[str]]]:
+    # Profiles let the Codex CLI (`codex --profile <name>`) select a provider +
+    # model without touching the top-level config the desktop app reads.
+    header = f"[profiles.{profile}]"
+    updated: list[tuple[str, list[str]]] = []
+    found = False
+    for section, lines in sections:
+        if section == header:
+            found = True
+            for key, value in settings.items():
+                lines = set_key(lines, key, value)
+        updated.append((section, lines))
+    if not found:
+        lines = ["\n" if updated and updated[-1][1] and updated[-1][1][-1].strip() else "", f"{header}\n"]
+        lines.extend(f'{key} = "{value}"\n' for key, value in settings.items())
+        updated.append((header, lines))
+    return updated
+
+
 def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
@@ -327,6 +348,14 @@ def rewrite_config_for_parallel(
                 lines = remove_key(lines, "model_catalog_json")
         rewritten.append((section, lines))
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [custom_model])
+    # CLI parity: `codex --profile ccswitch` -> custom route,
+    # `codex --profile official` -> official route.
+    rewritten = ensure_profile(
+        rewritten, "ccswitch", {"model_provider": CUSTOM_PROVIDER_ID, "model": custom_model}
+    )
+    rewritten = ensure_profile(
+        rewritten, "official", {"model_provider": "openai", "model": official_model}
+    )
     return "".join(line for _, lines in rewritten for line in lines)
 
 
@@ -1151,13 +1180,11 @@ def configure_codex(args: argparse.Namespace) -> int:
     # Codex's built-in catalog (no custom file); in custom mode the catalog
     # lists ONLY the custom model so an official model can't be picked and then
     # force-routed through the custom proxy/adapter.
-    if default_provider == CUSTOM_PROVIDER_ID:
-        write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
-        effective_catalog: Path | None = catalog_path
-    else:
-        if catalog_path.exists():
-            catalog_path.unlink()
-        effective_catalog = None
+    # Always write the superset catalog (official + historical + custom) so every
+    # model resolves in both the desktop app and the CLI profiles, regardless of
+    # which provider is the default.
+    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
+    effective_catalog: Path | None = catalog_path
     adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
     config = rewrite_config_for_parallel(
         read_config(config_path),

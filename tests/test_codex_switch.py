@@ -283,7 +283,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(read_state(home)["local_model"], "my-custom-model")
             self.assertEqual(read_state(home)["local_model_display_name"], "我的模型")
 
-    def test_configure_codex_official_mode_uses_builtin_catalog(self) -> None:
+    def test_configure_codex_writes_cli_profiles_and_superset_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -325,15 +325,25 @@ class CodexSwitchTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             config = (home / "config.toml").read_text(encoding="utf-8")
+            # Top-level (desktop default) is official.
             self.assertIn('model_provider = "openai"', config)
             self.assertIn('model = "gpt-official"', config)
-            # Both providers stay configured, but official mode relies on Codex's
-            # built-in catalog so the custom (proxy) model is not selectable and
-            # cannot be force-routed through the custom provider.
             self.assertIn('base_url = "https://custom.example/v1"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
-            self.assertNotIn('model_catalog_json', config)
-            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            # The superset catalog is always written so every model resolves in
+            # both the desktop app and the CLI profiles.
+            self.assertIn('model_catalog_json = "', config)
+            self.assertTrue((home / "codex-switch-model-catalog.json").exists())
+            # CLI parity: both routes are available as Codex profiles regardless
+            # of which provider is the desktop default.
+            self.assertIn('[profiles.ccswitch]', config)
+            self.assertIn('[profiles.official]', config)
+            ccswitch = config.split('[profiles.ccswitch]', 1)[1]
+            self.assertIn('model_provider = "custom"', ccswitch)
+            self.assertIn('model = "vendor/custom-model"', ccswitch)
+            official = config.split('[profiles.official]', 1)[1]
+            self.assertIn('model_provider = "openai"', official)
+            self.assertIn('model = "gpt-official"', official)
             self.assertNotIn("Provider-synced", result.stdout)
 
     def test_configure_codex_can_select_custom_provider_by_default(self) -> None:

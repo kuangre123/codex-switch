@@ -429,14 +429,14 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
+                Picker(texts.text("选择 API 提供方", "API Provider"), selection: $targetMode) {
                     Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
                     Text(officialProviderTitle).tag(ProviderMode.official)
                 }
                 .pickerStyle(.segmented)
 
                 if targetTool == .codex {
-                    Text(texts.text("官方和自定义 provider 会同时保留；这里选择保存后默认使用哪一路。", "Official and custom providers are both kept; choose which route is selected after saving."))
+                    Text(texts.text("官方和自定义 provider 会同时保留；这里选择默认使用哪一路（桌面端和 CLI 通用）。", "Official and custom providers are both kept; choose the default route (applies to both the desktop app and the CLI)."))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
