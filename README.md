@@ -4,11 +4,13 @@
 
 Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's model catalog, and controls which models appear in the picker based on the active provider. It can also run a local adapter that translates Codex Responses API requests to Chat Completions for OpenAI-compatible APIs that do not support Responses. Claude Code is supported by updating its official Claude login/custom API route through `~/.claude/settings.json`.
 
-Codex Switch 是一个很小的 macOS 工具，用来把 Codex 的官方 OpenAI 和自定义 API 并行配置到一起。它会注册自定义模型到 Codex 的模型目录，并根据当前激活的 provider 自动控制模型选择器里只显示对应的模型，不会官方和自定义混在一起。它同时提供命令行和双击可用的 macOS App，每次保存都会备份配置，并保留官方 ChatGPT 登录态。
+Codex Switch 是一个 macOS 工具，一键配置 Codex 的自定义 API，同时保留官方 OpenAI 登录。保存后 Codex 的模型选择器里只会出现你选的那个 provider 的模型。也支持 Claude Code 的官方 / 自定义 API 切换。
 
-它的核心特性是：Codex 侧把 Official OpenAI 和 custom provider 并行保留在配置里，但模型选择器只显示当前激活 provider 的模型；Claude Code 侧继续支持官方 / 自定义路由配置。
-
-官方 OpenAI provider 使用 ChatGPT/OpenAI 登录。自定义 API provider 使用 API key，把请求转发到兼容 OpenAI 的接口，并通过模型目录显示为你自定义的名称，例如”我的模型”。如果自定义接口只支持 Chat Completions，App 可以启用本地 adapter，把 Codex 的 Responses 请求转换过去。adapter 会在收到流式请求时立即返回 SSE 头，避免上游响应慢时 Codex 超时重连。
+- 选「自定义 API」：Codex 模型选择器里只出现你的自定义模型（比如”我的 GLM”），官方模型隐藏。
+- 选「官方 OpenAI」：模型选择器里只出现官方模型（GPT-5.5 等），自定义模型隐藏。
+- 两套配置始终保留在 `config.toml` 里，切换只需在 App 里改一下「选择 API 提供方」再保存。
+- 如果你的自定义 API 只支持 Chat Completions，勾选「Chat 适配器」即可，App 会在本地启动一个代理把 Codex 的 Responses 请求自动转换。
+- Claude Code 侧通过 `~/.claude/settings.json` 切换，不需要额外代理。
 
 ## Download App 下载 app：
 
