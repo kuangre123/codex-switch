@@ -436,24 +436,54 @@ def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: 
         )
 
 
+def historical_model_slugs(home: Path) -> list[str]:
+    """Every model id referenced by existing threads, in stable order.
+
+    Codex's model_catalog_json REPLACES the built-in catalog, so any model a
+    saved conversation used must also be present here or the desktop app cannot
+    resolve (and therefore cannot list/restore) that conversation. We collect
+    the model ids from the local thread databases so the generated catalog stays
+    a superset of what history needs.
+    """
+    slugs: list[str] = []
+    seen: set[str] = set()
+    databases = list((home / "sqlite").glob("state_*.sqlite")) + list(home.glob("state_*.sqlite"))
+    for database in databases:
+        try:
+            connection = sqlite3.connect(database)
+        except sqlite3.Error:
+            continue
+        try:
+            if "model" not in sqlite_columns(connection, "threads"):
+                continue
+            for (value,) in connection.execute(
+                "SELECT DISTINCT model FROM threads WHERE model IS NOT NULL AND model <> ''"
+            ):
+                if isinstance(value, str) and value not in seen:
+                    seen.add(value)
+                    slugs.append(value)
+        except sqlite3.Error:
+            continue
+        finally:
+            connection.close()
+    return slugs
+
+
 def custom_model_catalog(
     home: Path,
     model: str,
     display_name: str,
     additional_models: list[tuple[str, str]] | None = None,
-    include_official: bool = True,
 ) -> dict[str, object]:
-    # Official models are kept verbatim with their original display names; only
-    # genuinely custom models (slugs not present in the official catalog) are
-    # appended and may carry a user-defined display name.
-    #
-    # When include_official is False the catalog lists ONLY the custom model.
-    # This is used in custom-provider mode so Codex's picker cannot select an
-    # official model that would be force-routed through the custom proxy/adapter.
+    # The catalog must be a SUPERSET of everything Codex history needs because
+    # model_catalog_json replaces the built-in catalog. So we keep all official
+    # models verbatim (original names), add any model referenced by existing
+    # conversations (so they still resolve and restore), and finally add the
+    # custom model with its user-defined display name.
     official = load_official_models(home)
     by_slug = {item.get("slug"): item for item in official if isinstance(item.get("slug"), str)}
 
-    # Clone a real official model so custom entries inherit every required field.
+    # Clone a real official model so synthesized entries carry every required field.
     template: dict[str, object] | None = None
     for slug, _ in additional_models or []:
         if slug in by_slug:
@@ -462,14 +492,16 @@ def custom_model_catalog(
     if template is None and official:
         template = official[0]
 
-    if include_official:
-        models = official
-        seen = set(by_slug)
-        extras = list(additional_models or [])
-    else:
-        models = []
-        seen = set()
-        extras = []
+    models = list(official)
+    seen = set(by_slug)
+
+    # Preserve historical models referenced by saved conversations.
+    for slug in historical_model_slugs(home):
+        if slug and slug not in seen and slug != model:
+            models.append(custom_model_entry(slug, slug, template))
+            seen.add(slug)
+
+    extras = list(additional_models or [])
     extras.append((model, display_name))
     for slug, name in extras:
         if slug and slug not in seen:
@@ -484,14 +516,11 @@ def write_model_catalog(
     model: str,
     display_name: str | None = None,
     additional_models: list[tuple[str, str]] | None = None,
-    include_official: bool = True,
 ) -> None:
     atomic_write(
         path,
         json.dumps(
-            custom_model_catalog(
-                path.parent, model, display_name or model, additional_models, include_official
-            ),
+            custom_model_catalog(path.parent, model, display_name or model, additional_models),
             indent=2,
             ensure_ascii=False,
         )
@@ -952,6 +981,19 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str) 
         stderr=subprocess.DEVNULL,
     )
     time.sleep(1.5)
+    # Codex is now down, so the thread databases are unlocked. The desktop app
+    # filters the conversation list by model_provider, so re-tag every saved
+    # conversation to the active provider; otherwise switching providers hides
+    # all conversations created under the other one.
+    try:
+        changed_rollouts, sqlite_rows, _ = sync_provider_metadata(home, expected_provider)
+        if changed_rollouts or sqlite_rows:
+            print(
+                f"Synced existing conversations to provider {expected_provider} "
+                f"({changed_rollouts} session files, {sqlite_rows} database rows)."
+            )
+    except SwitchError as exc:
+        print(f"Warning: could not sync conversation provider metadata: {exc}")
     subprocess.run(["open", "-a", "Codex"], check=True)
     time.sleep(RESTART_SETTLE_SECONDS)
     actual_provider = configured_provider(read_config(home / "config.toml"))
@@ -1002,9 +1044,10 @@ def switch_local(args: argparse.Namespace) -> int:
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    # Pure-custom mode: expose only the custom model so the picker can't select
-    # an official model that would be force-routed through the custom provider.
-    write_model_catalog(catalog_path, model, include_official=False)
+    # The catalog must be a superset of every model history references, so keep
+    # official + historical models alongside the custom one (model_catalog_json
+    # replaces Codex's built-in catalog).
+    write_model_catalog(catalog_path, model)
     config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, catalog_path)
     atomic_write(config_path, config, 0o600)
 
@@ -1109,7 +1152,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     # lists ONLY the custom model so an official model can't be picked and then
     # force-routed through the custom proxy/adapter.
     if default_provider == CUSTOM_PROVIDER_ID:
-        write_model_catalog(catalog_path, custom_model, display_name, include_official=False)
+        write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
         effective_catalog: Path | None = catalog_path
     else:
         if catalog_path.exists():

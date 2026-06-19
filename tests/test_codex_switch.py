@@ -371,11 +371,47 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('models = ["vendor/custom-model"]', config)
             self.assertIn('model_catalog_json = "', config)
             self.assertEqual(read_state(home)["default_provider"], "custom")
-            # Custom mode exposes ONLY the custom model so an official model can't
-            # be picked and then force-routed through the custom proxy/adapter.
+            # Custom mode writes a catalog that is a SUPERSET: official models are
+            # kept (so saved conversations still resolve) and the custom model is
+            # appended with its display name. model_catalog_json replaces Codex's
+            # built-in catalog, so dropping official models would break history.
             catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            self.assertEqual([item["slug"] for item in catalog["models"]], ["vendor/custom-model"])
-            self.assertEqual(catalog["models"][0]["display_name"], "我的模型")
+            slugs = [item["slug"] for item in catalog["models"]]
+            self.assertIn("gpt-official", slugs)
+            self.assertIn("vendor/custom-model", slugs)
+            custom_entry = next(m for m in catalog["models"] if m["slug"] == "vendor/custom-model")
+            self.assertEqual(custom_entry["display_name"], "我的模型")
+            official_entry = next(m for m in catalog["models"] if m["slug"] == "gpt-official")
+            self.assertEqual(official_entry["display_name"], "GPT Official")
+
+    def test_custom_catalog_preserves_models_used_by_existing_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            (home / "models_cache.json").write_text(
+                json.dumps({"models": [{"slug": "gpt-5.5", "display_name": "GPT-5.5", "shell_type": "shell_command"}]}),
+                encoding="utf-8",
+            )
+            # A saved conversation that used a model no longer in models_cache.json.
+            db = home / "sqlite"
+            db.mkdir()
+            conn = sqlite3.connect(db / "state_1.sqlite")
+            conn.execute("CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT)")
+            conn.execute("INSERT INTO threads VALUES ('t1', 'gpt-5.2-codex', 'openai')")
+            conn.commit()
+            conn.close()
+
+            catalog = cli_module.custom_model_catalog(home, "glm-5.2", "我的GPT")
+            slugs = [m["slug"] for m in catalog["models"]]
+            # Historical model is preserved so the conversation still resolves, the
+            # official model keeps its name, and the custom model is named.
+            self.assertIn("gpt-5.2-codex", slugs)
+            self.assertIn("gpt-5.5", slugs)
+            self.assertIn("glm-5.2", slugs)
+            historical = next(m for m in catalog["models"] if m["slug"] == "gpt-5.2-codex")
+            self.assertEqual(historical["shell_type"], "shell_command")
+            custom = next(m for m in catalog["models"] if m["slug"] == "glm-5.2")
+            self.assertEqual(custom["display_name"], "我的GPT")
 
     def test_responses_adapter_translates_basic_request_to_chat_payload(self) -> None:
         payload = cli_module.responses_request_to_chat_payload(
@@ -818,6 +854,23 @@ class CodexSwitchTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Restarted Codex.app", result.stdout)
+
+    def test_restart_retags_all_conversations_to_active_provider(self) -> None:
+        # The desktop app filters the conversation list by model_provider, so a
+        # provider switch must re-tag every saved conversation or they vanish.
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)  # model_provider = "custom"
+            write_thread_database(home)
+            args = SimpleNamespace(restart_codex=True, migrate_latest=False)
+
+            with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
+                cli_module.restart_codex(args, home, "custom")
+
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+            # Every thread, including the previously openai-tagged ones, is now custom.
+            self.assertEqual(providers, {"custom"})
 
     def test_restart_repairs_thread_metadata_when_codex_reverts_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
