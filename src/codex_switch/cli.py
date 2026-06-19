@@ -746,21 +746,37 @@ def responses_input_to_chat_messages(request: dict[str, object]) -> list[dict[st
             role = item.get("role")
             if item_type == "message" or role in {"system", "developer", "user", "assistant"}:
                 chat_role = "system" if role == "developer" else role if isinstance(role, str) else "user"
-                messages.append({"role": chat_role, "content": response_content_to_text(item.get("content"))})
+                msg: dict[str, object] = {"role": chat_role, "content": response_content_to_text(item.get("content"))}
+                if chat_role == "assistant":
+                    reasoning = item.get("reasoning_content")
+                    if not reasoning:
+                        content = item.get("content")
+                        if isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") == "reasoning" and isinstance(part.get("text"), str):
+                                    reasoning = part["text"]
+                                    break
+                    if reasoning:
+                        msg["reasoning_content"] = reasoning
+                messages.append(msg)
             elif item_type == "function_call":
                 call_id = str(item.get("call_id") or item.get("id") or "")
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": str(item.get("name") or "tool"),
-                            "arguments": str(item.get("arguments") or "{}"),
-                        },
-                    }],
-                })
+                tool_call = {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": str(item.get("name") or "tool"),
+                        "arguments": str(item.get("arguments") or "{}"),
+                    },
+                }
+                if messages and messages[-1].get("role") == "assistant" and isinstance(messages[-1].get("tool_calls"), list):
+                    messages[-1]["tool_calls"].append(tool_call)
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [tool_call],
+                    })
             elif item_type == "function_call_output":
                 messages.append({
                     "role": "tool",
