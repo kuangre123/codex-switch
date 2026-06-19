@@ -2,10 +2,11 @@
 
 > 一个很小的 macOS 工具，用来把 Codex 官方 OpenAI 和自定义 API 并行配置到一起，也支持 Claude Code。
 
-Codex Switch 适合需要同时保留官方模型和自定义 API 的人。Codex 侧现在不再做“官方 / 自定义”二选一切换，而是把 Official OpenAI provider 和 custom provider 并行写入配置，并把自定义模型注册到 Codex 的模型目录里。用户之后直接在 Codex 里选择模型即可。它也支持 Claude Code，通过官方支持的 `~/.claude/settings.json` 的 `env` 配置切换官方 Claude / 自定义 Claude 兼容 API。
+Codex Switch 适合需要同时保留官方模型和自定义 API 的人。它把 Official OpenAI provider 和 custom provider 并行写入配置，并把自定义模型注册到 Codex 的模型目录里。模型选择器会根据当前激活的 provider 自动过滤，只显示对应的模型，不会把官方和自定义混在一起。它也支持 Claude Code，通过官方支持的 `~/.claude/settings.json` 的 `env` 配置切换官方 Claude / 自定义 Claude 兼容 API。
 
-- **官方 OpenAI provider**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`。
-- **自定义 API provider**：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 `custom`，模型可以显示成你自定义的名字，比如“我的模型”。
+- **官方 OpenAI provider**：使用 ChatGPT/OpenAI 登录，provider 是 `openai`，选择器里只显示官方模型。
+- **自定义 API provider**：使用 API key，把请求转发到兼容 OpenAI 的接口，provider 是 `custom`，选择器里只显示自定义模型，可以显示成你自定义的名字，比如”我的模型”。
+- **Chat 适配器**：如果你的自定义接口只支持 Chat Completions，可以启用本地 adapter 自动转换。adapter 会在收到流式请求时立即返回 SSE 头，避免上游响应慢时 Codex 超时重连。
 
 默认自定义 API 地址是：
 
@@ -57,7 +58,7 @@ codex-switch claude-local
 codex-switch claude-official
 ```
 
-Codex 现在不是“切换官方/自定义”二选一，而是并行配置：官方 OpenAI 和自定义 API 会同时写入配置，App 保存后重启 Codex，之后你在 Codex 自己的模型选择器里选择要用的模型。
+Codex 并行配置：官方 OpenAI 和自定义 API 会同时写入配置，App 保存后重启 Codex。模型选择器只显示当前激活 provider 对应的模型，切换 provider 需要在 App 里修改「选择 API 提供方」后重新保存。
 
 切换 Claude Code 时，App 会修改 `~/.claude/settings.json` 里的 `env`：
 
