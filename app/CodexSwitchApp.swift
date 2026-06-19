@@ -429,11 +429,29 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Picker(texts.text("选择 API 提供方", "API Provider"), selection: $targetMode) {
-                    Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
-                    Text(officialProviderTitle).tag(ProviderMode.official)
+                settingRow(texts.text("选择 API 提供方", "API Provider")) {
+                    HStack(spacing: 12) {
+                        Button {
+                            targetMode = .custom
+                        } label: {
+                            Text(texts.text("自定义 API", "Custom API"))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(targetMode == .custom ? .blue : .gray)
+                        .controlSize(.regular)
+
+                        Button {
+                            targetMode = .official
+                        } label: {
+                            Text(officialProviderTitle)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(targetMode == .official ? .blue : .gray)
+                        .controlSize(.regular)
+                    }
                 }
-                .pickerStyle(.segmented)
 
                 if targetTool == .codex {
                     Text(texts.text("官方和自定义 provider 会同时保留；这里选择默认使用哪一路（桌面端和 CLI 通用）。", "Official and custom providers are both kept; choose the default route (applies to both the desktop app and the CLI)."))
@@ -463,21 +481,23 @@ struct ContentView: View {
                                 .help(texts.text("留空继续使用现有 API Key", "Leave blank to keep the saved API key"))
                         }
                     }
-                    settingRow(texts.text("官方模型", "Official Model")) {
-                        HStack(spacing: 8) {
-                            TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.officialModel)
-                            Menu {
-                                ForEach(officialModelOptions, id: \.self) { option in
-                                    Button(option) {
-                                        model.officialModel = option
+                    if targetMode == .official {
+                        settingRow(texts.text("官方模型", "Official Model")) {
+                            HStack(spacing: 8) {
+                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.officialModel)
+                                Menu {
+                                    ForEach(officialModelOptions, id: \.self) { option in
+                                        Button(option) {
+                                            model.officialModel = option
+                                        }
                                     }
+                                } label: {
+                                    Image(systemName: "chevron.down.circle")
+                                        .imageScale(.large)
                                 }
-                            } label: {
-                                Image(systemName: "chevron.down.circle")
-                                    .imageScale(.large)
+                                .menuStyle(.borderlessButton)
+                                .help(texts.text("选择官方模型", "Choose official model"))
                             }
-                            .menuStyle(.borderlessButton)
-                            .help(texts.text("选择官方模型", "Choose official model"))
                         }
                     }
                 }
