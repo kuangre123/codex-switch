@@ -283,7 +283,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(read_state(home)["local_model"], "my-custom-model")
             self.assertEqual(read_state(home)["local_model_display_name"], "我的模型")
 
-    def test_configure_codex_keeps_official_and_custom_models_parallel(self) -> None:
+    def test_configure_codex_official_mode_uses_builtin_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -327,20 +327,13 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "openai"', config)
             self.assertIn('model = "gpt-official"', config)
-            self.assertIn('model_catalog_json = "', config)
+            # Both providers stay configured, but official mode relies on Codex's
+            # built-in catalog so the custom (proxy) model is not selectable and
+            # cannot be force-routed through the custom provider.
             self.assertIn('base_url = "https://custom.example/v1"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
-            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            self.assertEqual([item["slug"] for item in catalog["models"]], ["gpt-official", "vendor/custom-model"])
-            custom_entry = catalog["models"][1]
-            self.assertEqual(custom_entry["display_name"], "我的模型")
-            # The custom entry must inherit required fields from the official template
-            # (Codex rejects the catalog otherwise) but must not carry an upgrade path.
-            self.assertEqual(custom_entry["shell_type"], "shell_command")
-            self.assertIn("model_messages", custom_entry)
-            self.assertNotIn("upgrade", custom_entry)
-            # Official entry is untouched.
-            self.assertEqual(catalog["models"][0]["display_name"], "GPT Official")
+            self.assertNotIn('model_catalog_json', config)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
             self.assertNotIn("Provider-synced", result.stdout)
 
     def test_configure_codex_can_select_custom_provider_by_default(self) -> None:
@@ -376,7 +369,13 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model_provider = "custom"', config)
             self.assertIn('model = "vendor/custom-model"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
+            self.assertIn('model_catalog_json = "', config)
             self.assertEqual(read_state(home)["default_provider"], "custom")
+            # Custom mode exposes ONLY the custom model so an official model can't
+            # be picked and then force-routed through the custom proxy/adapter.
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["slug"] for item in catalog["models"]], ["vendor/custom-model"])
+            self.assertEqual(catalog["models"][0]["display_name"], "我的模型")
 
     def test_responses_adapter_translates_basic_request_to_chat_payload(self) -> None:
         payload = cli_module.responses_request_to_chat_payload(

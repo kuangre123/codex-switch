@@ -305,7 +305,7 @@ def rewrite_config_for_parallel(
     official_model: str,
     custom_model: str,
     api_key: str,
-    catalog_path: Path,
+    catalog_path: Path | None,
     default_provider: str = "openai",
 ) -> str:
     sections = split_toml_sections(content)
@@ -321,7 +321,10 @@ def rewrite_config_for_parallel(
             lines = set_key(lines, "model_provider", selected_provider)
             lines = set_key(lines, "model", selected_model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
-            lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            if catalog_path is not None:
+                lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            else:
+                lines = remove_key(lines, "model_catalog_json")
         rewritten.append((section, lines))
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [custom_model])
     return "".join(line for _, lines in rewritten for line in lines)
@@ -438,13 +441,17 @@ def custom_model_catalog(
     model: str,
     display_name: str,
     additional_models: list[tuple[str, str]] | None = None,
+    include_official: bool = True,
 ) -> dict[str, object]:
     # Official models are kept verbatim with their original display names; only
     # genuinely custom models (slugs not present in the official catalog) are
     # appended and may carry a user-defined display name.
-    models = load_official_models(home)
-    by_slug = {item.get("slug"): item for item in models if isinstance(item.get("slug"), str)}
-    seen = set(by_slug)
+    #
+    # When include_official is False the catalog lists ONLY the custom model.
+    # This is used in custom-provider mode so Codex's picker cannot select an
+    # official model that would be force-routed through the custom proxy/adapter.
+    official = load_official_models(home)
+    by_slug = {item.get("slug"): item for item in official if isinstance(item.get("slug"), str)}
 
     # Clone a real official model so custom entries inherit every required field.
     template: dict[str, object] | None = None
@@ -452,10 +459,17 @@ def custom_model_catalog(
         if slug in by_slug:
             template = by_slug[slug]
             break
-    if template is None and models:
-        template = models[0]
+    if template is None and official:
+        template = official[0]
 
-    extras = list(additional_models or [])
+    if include_official:
+        models = official
+        seen = set(by_slug)
+        extras = list(additional_models or [])
+    else:
+        models = []
+        seen = set()
+        extras = []
     extras.append((model, display_name))
     for slug, name in extras:
         if slug and slug not in seen:
@@ -470,11 +484,14 @@ def write_model_catalog(
     model: str,
     display_name: str | None = None,
     additional_models: list[tuple[str, str]] | None = None,
+    include_official: bool = True,
 ) -> None:
     atomic_write(
         path,
         json.dumps(
-            custom_model_catalog(path.parent, model, display_name or model, additional_models),
+            custom_model_catalog(
+                path.parent, model, display_name or model, additional_models, include_official
+            ),
             indent=2,
             ensure_ascii=False,
         )
@@ -985,7 +1002,9 @@ def switch_local(args: argparse.Namespace) -> int:
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    write_model_catalog(catalog_path, model)
+    # Pure-custom mode: expose only the custom model so the picker can't select
+    # an official model that would be force-routed through the custom provider.
+    write_model_catalog(catalog_path, model, include_official=False)
     config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, catalog_path)
     atomic_write(config_path, config, 0o600)
 
@@ -1084,7 +1103,18 @@ def configure_codex(args: argparse.Namespace) -> int:
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
+    # The Codex picker has a single active provider, so the model catalog must
+    # only expose models that route to it. In official mode we fall back to
+    # Codex's built-in catalog (no custom file); in custom mode the catalog
+    # lists ONLY the custom model so an official model can't be picked and then
+    # force-routed through the custom proxy/adapter.
+    if default_provider == CUSTOM_PROVIDER_ID:
+        write_model_catalog(catalog_path, custom_model, display_name, include_official=False)
+        effective_catalog: Path | None = catalog_path
+    else:
+        if catalog_path.exists():
+            catalog_path.unlink()
+        effective_catalog = None
     adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
     config = rewrite_config_for_parallel(
         read_config(config_path),
@@ -1092,7 +1122,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         official_model,
         custom_model,
         api_key,
-        catalog_path,
+        effective_catalog,
         default_provider,
     )
     atomic_write(config_path, config, 0o600)
@@ -1107,7 +1137,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         print(f"adapter_launch_agent: {adapter_plist}")
     print(f"custom_model: {custom_model}")
     print(f"custom_model_name: {display_name}")
-    print(f"model_catalog_json: {catalog_path}")
+    print(f"model_catalog_json: {effective_catalog if effective_catalog is not None else '(built-in)'}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     restart_codex(args, home, default_provider)
