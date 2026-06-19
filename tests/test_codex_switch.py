@@ -176,7 +176,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model = "gpt-5.5"', config)
             self.assertIn('preferred_auth_method = "chatgpt"', config)
             self.assertIn('base_url = "http://127.0.0.1:15721/v1"', config)
-            self.assertIn('requires_openai_auth = true', config)
+            self.assertIn('requires_openai_auth = false', config)
             self.assertIn('wire_api = "responses"', config)
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
             self.assertIn('model_catalog_json = "', config)

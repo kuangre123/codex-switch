@@ -250,7 +250,7 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str,
             found = True
             lines = set_key(lines, "base_url", base_url)
             lines = set_key(lines, "name", CUSTOM_PROVIDER_ID)
-            lines = set_bool_key(lines, "requires_openai_auth", True)
+            lines = set_bool_key(lines, "requires_openai_auth", False)
             lines = set_key(lines, "wire_api", "responses")
             lines = set_key(lines, "experimental_bearer_token", api_key)
             lines = set_raw_key(lines, "models", quoted_array(models))
@@ -261,7 +261,7 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str,
             f"[model_providers.{CUSTOM_PROVIDER_ID}]\n",
             f'base_url = "{base_url}"\n',
             f'name = "{CUSTOM_PROVIDER_ID}"\n',
-            "requires_openai_auth = true\n",
+            "requires_openai_auth = false\n",
             'wire_api = "responses"\n',
             f'experimental_bearer_token = "{api_key}"\n',
             f"models = {quoted_array(models)}\n",
