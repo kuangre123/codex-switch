@@ -394,8 +394,9 @@ def custom_model_entry(
         entry["slug"] = model
         entry["display_name"] = display_name
         entry["description"] = "Custom model registered by Codex Switch"
-        # A custom endpoint should not advertise an upgrade to an official model.
+        entry["priority"] = 100
         entry.pop("upgrade", None)
+        entry.pop("availability_nux", None)
         return entry
     return {
         "slug": model,
