@@ -567,16 +567,38 @@ def write_model_catalog(
     additional_models: list[tuple[str, str]] | None = None,
     visible_provider: str = CUSTOM_PROVIDER_ID,
 ) -> None:
+    catalog = custom_model_catalog(path.parent, model, display_name or model, additional_models, visible_provider)
     atomic_write(
         path,
-        json.dumps(
-            custom_model_catalog(path.parent, model, display_name or model, additional_models, visible_provider),
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
+        json.dumps(catalog, indent=2, ensure_ascii=False) + "\n",
         0o600,
     )
+    inject_custom_model_into_cache(path.parent, model, display_name or model, catalog)
+
+
+def inject_custom_model_into_cache(home: Path, model: str, display_name: str, catalog: dict[str, object]) -> None:
+    cache_path = home / "models_cache.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    models = cache.get("models")
+    if not isinstance(models, list):
+        return
+    custom_entry = None
+    for m in catalog.get("models", []):
+        if isinstance(m, dict) and m.get("slug") == model:
+            custom_entry = m
+            break
+    if custom_entry is None:
+        return
+    for i, m in enumerate(models):
+        if isinstance(m, dict) and m.get("slug") == model:
+            models[i] = custom_entry
+            atomic_write(cache_path, json.dumps(cache, indent=2, ensure_ascii=False) + "\n", 0o600)
+            return
+    models.insert(0, custom_entry)
+    atomic_write(cache_path, json.dumps(cache, indent=2, ensure_ascii=False) + "\n", 0o600)
 
 
 def rollout_files(home: Path) -> list[Path]:
