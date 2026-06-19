@@ -391,8 +391,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("vendor/custom-model", slugs)
             custom_entry = next(m for m in catalog["models"] if m["slug"] == "vendor/custom-model")
             self.assertEqual(custom_entry["display_name"], "我的模型")
+            # When default_provider is custom, custom model is visible and
+            # official models are hidden from the picker.
+            self.assertNotEqual(custom_entry.get("visibility"), "hide")
             official_entry = next(m for m in catalog["models"] if m["slug"] == "gpt-official")
             self.assertEqual(official_entry["display_name"], "GPT Official")
+            self.assertEqual(official_entry["visibility"], "hide")
 
     def test_custom_catalog_preserves_models_used_by_existing_threads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

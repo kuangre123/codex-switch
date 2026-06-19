@@ -503,6 +503,7 @@ def custom_model_catalog(
     model: str,
     display_name: str,
     additional_models: list[tuple[str, str]] | None = None,
+    visible_provider: str = CUSTOM_PROVIDER_ID,
 ) -> dict[str, object]:
     # The catalog must be a SUPERSET of everything Codex history needs because
     # model_catalog_json replaces the built-in catalog. So we keep all official
@@ -524,6 +525,12 @@ def custom_model_catalog(
     models = list(official)
     seen = set(by_slug)
 
+    # When the active provider is not openai, hide official models from the
+    # picker so users only see models routable through the active provider.
+    if visible_provider != "openai":
+        for m in models:
+            m["visibility"] = "hide"
+
     # Preserve historical models referenced by saved conversations, but hide
     # them from the picker so it isn't cluttered with old/experimental slugs.
     # They stay in the catalog only so those conversations still resolve.
@@ -538,7 +545,9 @@ def custom_model_catalog(
     extras.append((model, display_name))
     for slug, name in extras:
         if slug and slug not in seen:
-            models.append(custom_model_entry(slug, name or slug, template))
+            entry = custom_model_entry(slug, name or slug, template)
+            entry["visibility"] = "list" if visible_provider == CUSTOM_PROVIDER_ID else "hide"
+            models.append(entry)
             seen.add(slug)
 
     return {"models": models}
@@ -549,11 +558,12 @@ def write_model_catalog(
     model: str,
     display_name: str | None = None,
     additional_models: list[tuple[str, str]] | None = None,
+    visible_provider: str = CUSTOM_PROVIDER_ID,
 ) -> None:
     atomic_write(
         path,
         json.dumps(
-            custom_model_catalog(path.parent, model, display_name or model, additional_models),
+            custom_model_catalog(path.parent, model, display_name or model, additional_models, visible_provider),
             indent=2,
             ensure_ascii=False,
         )
@@ -877,6 +887,27 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         if not api_key:
             raise SwitchError("adapter API key is missing")
         stream = bool(request.get("stream"))
+        resp_id = f"resp_{uuid.uuid4().hex}"
+
+        if stream:
+            # Send SSE headers and initial event immediately so Codex
+            # knows the connection is alive while we wait for upstream.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.write_sse("response.created", {
+                "type": "response.created",
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "created_at": int(time.time()),
+                    "status": "in_progress",
+                    "model": upstream_model,
+                    "output": [],
+                },
+            })
+
         # Always ask the upstream Chat Completions endpoint for a complete
         # response. Many OpenAI-compatible relays stream text deltas but omit or
         # vary tool-call deltas; Codex needs reliable tool calls more than token
@@ -895,12 +926,32 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             with urllib.request.urlopen(upstream_request, timeout=120) as response:
                 chat = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            self.send_json(exc.code, {"error": {"message": exc.read().decode("utf-8", errors="replace")}})
+            error_body = exc.read().decode("utf-8", errors="replace")
+            if stream:
+                self.write_sse("response.failed", {
+                    "type": "response.failed",
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "created_at": int(time.time()),
+                        "status": "failed",
+                        "model": upstream_model,
+                        "output": [],
+                        "error": {"message": error_body},
+                    },
+                })
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+            self.send_json(exc.code, {"error": {"message": error_body}})
             return
+
+        result = chat_response_to_responses(chat, upstream_model)
+        result["id"] = resp_id
         if stream:
-            self.write_response_stream(chat_response_to_responses(chat, upstream_model))
+            self.write_response_stream(result)
             return
-        self.send_json(200, chat_response_to_responses(chat, upstream_model))
+        self.send_json(200, result)
 
     def write_sse(self, event: str, payload: dict[str, object]) -> None:
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
@@ -908,13 +959,6 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def write_response_stream(self, response_payload: dict[str, object]) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        created = dict(response_payload)
-        created["status"] = "in_progress"
-        self.write_sse("response.created", {"type": "response.created", "response": created})
         output = response_payload.get("output")
         if isinstance(output, list):
             for index, item in enumerate(output):
@@ -1187,7 +1231,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     # Always write the superset catalog (official + historical + custom) so every
     # model resolves in both the desktop app and the CLI profiles, regardless of
     # which provider is the default.
-    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
+    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)], visible_provider=default_provider)
     effective_catalog: Path | None = catalog_path
     adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
     config = rewrite_config_for_parallel(
