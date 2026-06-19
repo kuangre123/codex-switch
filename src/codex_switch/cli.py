@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import getpass
+import http.server
 import json
 import os
 import re
@@ -16,15 +17,22 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
+import uuid
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
 DEFAULT_CUSTOM_MODEL = "my-gpt-5.5"
+DEFAULT_ADAPTER_HOST = "127.0.0.1"
+DEFAULT_ADAPTER_PORT = 17638
+DEFAULT_ADAPTER_BASE_URL = f"http://{DEFAULT_ADAPTER_HOST}:{DEFAULT_ADAPTER_PORT}/v1"
 CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
@@ -298,13 +306,20 @@ def rewrite_config_for_parallel(
     custom_model: str,
     api_key: str,
     catalog_path: Path,
+    default_provider: str = "openai",
 ) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
+    if default_provider == CUSTOM_PROVIDER_ID:
+        selected_provider = CUSTOM_PROVIDER_ID
+        selected_model = custom_model
+    else:
+        selected_provider = "openai"
+        selected_model = official_model
     for section, lines in sections:
         if section == "":
-            lines = set_key(lines, "model_provider", "openai")
-            lines = set_key(lines, "model", official_model)
+            lines = set_key(lines, "model_provider", selected_provider)
+            lines = set_key(lines, "model", selected_model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
             lines = set_key(lines, "model_catalog_json", str(catalog_path))
         rewritten.append((section, lines))
@@ -587,6 +602,329 @@ def print_migration(home: Path, provider: str, _model: str, args: argparse.Names
     print(f"provider_sync_backup: {backup_dir}")
 
 
+def strip_trailing_slash(value: str) -> str:
+    return value.rstrip("/")
+
+
+def chat_completions_url(base_url: str) -> str:
+    base = strip_trailing_slash(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def response_content_to_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and item.get("type") in {"input_text", "output_text", "text"}:
+                chunks.append(text)
+        return "\n".join(chunks)
+    return ""
+
+
+def responses_input_to_chat_messages(request: dict[str, object]) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = []
+    instructions = request.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        messages.append({"role": "system", "content": instructions})
+    raw_input = request.get("input")
+    if isinstance(raw_input, str):
+        messages.append({"role": "user", "content": raw_input})
+    elif isinstance(raw_input, list):
+        for item in raw_input:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            role = item.get("role")
+            if item_type == "message" or role in {"system", "developer", "user", "assistant"}:
+                chat_role = "system" if role == "developer" else role if isinstance(role, str) else "user"
+                messages.append({"role": chat_role, "content": response_content_to_text(item.get("content"))})
+            elif item_type == "function_call":
+                call_id = str(item.get("call_id") or item.get("id") or "")
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("name") or "tool"),
+                            "arguments": str(item.get("arguments") or "{}"),
+                        },
+                    }],
+                })
+            elif item_type == "function_call_output":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": str(item.get("call_id") or ""),
+                    "content": response_content_to_text(item.get("output")) or str(item.get("output") or ""),
+                })
+    if not messages:
+        messages.append({"role": "user", "content": ""})
+    return messages
+
+
+def responses_tools_to_chat_tools(tools: object) -> list[dict[str, object]]:
+    if not isinstance(tools, list):
+        return []
+    output: list[dict[str, object]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "function" and isinstance(tool.get("name"), str):
+            output.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description") or "",
+                    "parameters": tool.get("parameters") or {},
+                },
+            })
+    return output
+
+
+def responses_request_to_chat_payload(request: dict[str, object], upstream_model: str, stream: bool) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "model": upstream_model,
+        "messages": responses_input_to_chat_messages(request),
+        "stream": stream,
+    }
+    tools = responses_tools_to_chat_tools(request.get("tools"))
+    if tools:
+        payload["tools"] = tools
+    for key in ("temperature", "top_p", "max_tokens", "max_completion_tokens"):
+        if key in request:
+            payload[key] = request[key]
+    return payload
+
+
+def chat_message_to_response_output(message: dict[str, object]) -> list[dict[str, object]]:
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        output: list[dict[str, object]] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            output.append({
+                "type": "function_call",
+                "id": str(call.get("id") or f"fc_{uuid.uuid4().hex}"),
+                "call_id": str(call.get("id") or f"call_{uuid.uuid4().hex}"),
+                "name": str(function.get("name") or "tool"),
+                "arguments": str(function.get("arguments") or "{}"),
+                "status": "completed",
+            })
+        return output
+    text = message.get("content")
+    return [{
+        "type": "message",
+        "id": f"msg_{uuid.uuid4().hex}",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text if isinstance(text, str) else "", "annotations": []}],
+    }]
+
+
+def chat_response_to_responses(chat: dict[str, object], model: str) -> dict[str, object]:
+    choices = chat.get("choices")
+    message: dict[str, object] = {}
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        maybe_message = choices[0].get("message")
+        if isinstance(maybe_message, dict):
+            message = maybe_message
+    return {
+        "id": f"resp_{uuid.uuid4().hex}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": chat_message_to_response_output(message),
+        "usage": chat.get("usage"),
+    }
+
+
+class AdapterServer(http.server.ThreadingHTTPServer):
+    def __init__(self, server_address: tuple[str, int], home: Path):
+        super().__init__(server_address, AdapterHandler)
+        self.home = home
+
+
+class AdapterHandler(http.server.BaseHTTPRequestHandler):
+    server: AdapterServer
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def send_json(self, status: int, payload: dict[str, object]) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        if self.path in {"/health", "/v1/health"}:
+            self.send_json(200, {"status": "ok"})
+            return
+        self.send_json(404, {"error": {"message": "not found"}})
+
+    def do_POST(self) -> None:
+        if self.path not in {"/responses", "/v1/responses"}:
+            self.send_json(404, {"error": {"message": "not found"}})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length)
+            request = json.loads(body.decode("utf-8"))
+            if not isinstance(request, dict):
+                raise ValueError("request body must be a JSON object")
+            self.proxy_response(request)
+        except Exception as exc:
+            self.send_json(500, {"error": {"message": str(exc)}})
+
+    def proxy_response(self, request: dict[str, object]) -> None:
+        state = load_state(self.server.home)
+        auth = load_auth(self.server.home / "auth.json")
+        upstream_base_url = effective_setting(state, "adapter_upstream_base_url", effective_setting(state, "local_base_url", DEFAULT_BASE_URL))
+        upstream_model = effective_setting(state, "adapter_upstream_model", effective_setting(state, "local_model", DEFAULT_MODEL))
+        api_key = effective_setting(state, "local_api_key", str(auth.get("OPENAI_API_KEY") or ""))
+        if not api_key:
+            raise SwitchError("adapter API key is missing")
+        stream = bool(request.get("stream"))
+        # Always ask the upstream Chat Completions endpoint for a complete
+        # response. Many OpenAI-compatible relays stream text deltas but omit or
+        # vary tool-call deltas; Codex needs reliable tool calls more than token
+        # streaming when we bridge Chat Completions to Responses.
+        payload = responses_request_to_chat_payload(request, upstream_model, False)
+        upstream_request = urllib.request.Request(
+            chat_completions_url(upstream_base_url),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(upstream_request, timeout=120) as response:
+                chat = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            self.send_json(exc.code, {"error": {"message": exc.read().decode("utf-8", errors="replace")}})
+            return
+        if stream:
+            self.write_response_stream(chat_response_to_responses(chat, upstream_model))
+            return
+        self.send_json(200, chat_response_to_responses(chat, upstream_model))
+
+    def write_sse(self, event: str, payload: dict[str, object]) -> None:
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
+        self.wfile.flush()
+
+    def write_response_stream(self, response_payload: dict[str, object]) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        created = dict(response_payload)
+        created["status"] = "in_progress"
+        self.write_sse("response.created", {"type": "response.created", "response": created})
+        output = response_payload.get("output")
+        if isinstance(output, list):
+            for index, item in enumerate(output):
+                if not isinstance(item, dict):
+                    continue
+                in_progress = dict(item)
+                in_progress["status"] = "in_progress"
+                item_id = str(item.get("id") or f"item_{uuid.uuid4().hex}")
+                self.write_sse("response.output_item.added", {"type": "response.output_item.added", "output_index": index, "item": in_progress})
+                if item.get("type") == "message":
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for content_index, part in enumerate(content):
+                            if not isinstance(part, dict):
+                                continue
+                            self.write_sse("response.content_part.added", {"type": "response.content_part.added", "output_index": index, "content_index": content_index, "item_id": item_id, "part": part})
+                            text = part.get("text")
+                            if isinstance(text, str) and text:
+                                self.write_sse("response.output_text.delta", {"type": "response.output_text.delta", "output_index": index, "content_index": content_index, "item_id": item_id, "delta": text})
+                                self.write_sse("response.output_text.done", {"type": "response.output_text.done", "output_index": index, "content_index": content_index, "item_id": item_id, "text": text})
+                            self.write_sse("response.content_part.done", {"type": "response.content_part.done", "output_index": index, "content_index": content_index, "item_id": item_id, "part": part})
+                self.write_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": index, "item": item})
+        self.write_sse("response.completed", {"type": "response.completed", "response": response_payload})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+
+def run_adapter(args: argparse.Namespace) -> int:
+    home = Path(args.codex_home).expanduser() if args.codex_home else codex_home()
+    server = AdapterServer((args.host, args.port), home)
+    print(f"Codex Switch adapter listening on http://{args.host}:{args.port}/v1")
+    server.serve_forever()
+    return 0
+
+
+def adapter_launch_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / "com.kuangre.codex-switch.adapter.plist"
+
+
+def launchctl_gui_target() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def write_adapter_launch_agent(home: Path, host: str = DEFAULT_ADAPTER_HOST, port: int = DEFAULT_ADAPTER_PORT) -> Path:
+    path = adapter_launch_agent_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cli_path = str(Path(sys.argv[0]).resolve())
+    log_path = str(home / "codex-switch-adapter.log")
+    content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kuangre.codex-switch.adapter</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{xml_escape(cli_path)}</string>
+    <string>adapter</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>{host}</string>
+    <string>--port</string>
+    <string>{port}</string>
+    <string>--codex-home</string>
+    <string>{xml_escape(str(home))}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{xml_escape(log_path)}</string>
+  <key>StandardErrorPath</key>
+  <string>{xml_escape(log_path)}</string>
+</dict>
+</plist>
+'''
+    atomic_write(path, content, 0o644)
+    return path
+
+
+def start_adapter_launch_agent(home: Path) -> Path:
+    path = write_adapter_launch_agent(home)
+    subprocess.run(["launchctl", "bootout", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["launchctl", "bootstrap", launchctl_gui_target(), str(path)], check=True)
+    subprocess.run(["launchctl", "kickstart", "-k", f"{launchctl_gui_target()}/com.kuangre.codex-switch.adapter"], check=False)
+    return path
+
+
 def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str) -> None:
     if not getattr(args, "restart_codex", False):
         return
@@ -708,6 +1046,9 @@ def configure_codex(args: argparse.Namespace) -> int:
     custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_CUSTOM_MODEL)
     display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", custom_model)
     official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    default_provider = args.default_provider or effective_setting(state, "default_provider", "openai")
+    if default_provider not in {"openai", CUSTOM_PROVIDER_ID}:
+        raise SwitchError("default_provider must be openai or custom")
     ensure_distinct_custom_model(home, custom_model, official_model)
     cached_key = state.get("local_api_key")
     stdin_key = ""
@@ -729,26 +1070,47 @@ def configure_codex(args: argparse.Namespace) -> int:
     state["local_model"] = custom_model
     state["local_model_display_name"] = display_name
     state["official_model"] = official_model
+    state["default_provider"] = default_provider
+    if getattr(args, "chat_adapter", False):
+        state["chat_adapter"] = "true"
+        state["adapter_upstream_base_url"] = base_url
+        state["adapter_upstream_model"] = custom_model
+        provider_base_url = DEFAULT_ADAPTER_BASE_URL
+    else:
+        state["chat_adapter"] = "false"
+        provider_base_url = base_url
     save_state(home, state)
 
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
     write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)])
-    config = rewrite_config_for_parallel(read_config(config_path), base_url, official_model, custom_model, api_key, catalog_path)
+    adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
+    config = rewrite_config_for_parallel(
+        read_config(config_path),
+        provider_base_url,
+        official_model,
+        custom_model,
+        api_key,
+        catalog_path,
+        default_provider,
+    )
     atomic_write(config_path, config, 0o600)
 
     print("Configured Codex official and custom providers in parallel.")
     print(f"codex_home: {home}")
-    print("model_provider: openai")
+    print(f"model_provider: {default_provider}")
     print(f"official_model: {official_model}")
-    print(f"custom.base_url: {base_url}")
+    print(f"custom.base_url: {provider_base_url}")
+    if adapter_plist is not None:
+        print(f"adapter_upstream_base_url: {base_url}")
+        print(f"adapter_launch_agent: {adapter_plist}")
     print(f"custom_model: {custom_model}")
     print(f"custom_model_name: {display_name}")
     print(f"model_catalog_json: {catalog_path}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
-    restart_codex(args, home, "openai")
+    restart_codex(args, home, default_provider)
     return 0
 
 
@@ -782,6 +1144,9 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL)}")
     print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL))}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
+    print(f"default_provider: {effective_setting(state, 'default_provider', 'openai')}")
+    print(f"chat_adapter: {effective_setting(state, 'chat_adapter', 'false')}")
+    print(f"adapter_upstream_base_url: {effective_setting(state, 'adapter_upstream_base_url', effective_setting(state, 'local_base_url', DEFAULT_BASE_URL))}")
     return 0
 
 
@@ -793,6 +1158,7 @@ def config_set(args: argparse.Namespace) -> int:
         "local_model": args.local_model,
         "local_model_display_name": args.local_model_display_name,
         "official_model": args.official_model,
+        "default_provider": args.default_provider,
     }
     for key, value in updates.items():
         if value is not None:
@@ -1047,6 +1413,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser.add_argument("--local-model", help="Default local model.")
     config_set_parser.add_argument("--local-model-display-name", help="Display name for the custom Codex model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
+    config_set_parser.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving.")
     config_set_parser.set_defaults(func=config_set)
 
     configure = subparsers.add_parser("configure", help="Configure Codex official and custom providers in parallel.")
@@ -1058,8 +1425,18 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--custom-model", help=f"Custom model slug. Must be different from official Codex model IDs. Default: saved setting or {DEFAULT_CUSTOM_MODEL}")
     configure.add_argument("--custom-model-name", help="Display name for the custom model.")
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
+    configure.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving. Defaults to saved setting or openai.")
+    configure.add_argument("--chat-adapter", action="store_true", help="Route Codex Responses API traffic through the local chat-completions adapter.")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
     configure.set_defaults(func=configure_codex)
+
+    adapter = subparsers.add_parser("adapter", help="Run or manage the local Responses-to-Chat adapter.")
+    adapter_subparsers = adapter.add_subparsers(dest="adapter_command", required=True)
+    adapter_serve = adapter_subparsers.add_parser("serve", help="Serve the local Responses-to-Chat adapter.")
+    adapter_serve.add_argument("--host", default=DEFAULT_ADAPTER_HOST)
+    adapter_serve.add_argument("--port", type=int, default=DEFAULT_ADAPTER_PORT)
+    adapter_serve.add_argument("--codex-home")
+    adapter_serve.set_defaults(func=run_adapter)
 
     register_model_parser = subparsers.add_parser("register-model", help="Write a Codex model catalog for a custom model.")
     register_model_parser.add_argument("model", help="Custom model slug to expose to Codex.")

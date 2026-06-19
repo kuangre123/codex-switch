@@ -343,6 +343,100 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(catalog["models"][0]["display_name"], "GPT Official")
             self.assertNotIn("Provider-synced", result.stdout)
 
+    def test_configure_codex_can_select_custom_provider_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(
+                json.dumps({"models": [{"slug": "gpt-official", "display_name": "GPT Official", "shell_type": "shell_command"}]}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "configure",
+                "--base-url",
+                "https://custom.example/v1",
+                "--custom-model",
+                "vendor/custom-model",
+                "--custom-model-name",
+                "我的模型",
+                "--official-model",
+                "gpt-official",
+                "--default-provider",
+                "custom",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('model_provider = "custom"', config)
+            self.assertIn('model = "vendor/custom-model"', config)
+            self.assertIn('models = ["vendor/custom-model"]', config)
+            self.assertEqual(read_state(home)["default_provider"], "custom")
+
+    def test_responses_adapter_translates_basic_request_to_chat_payload(self) -> None:
+        payload = cli_module.responses_request_to_chat_payload(
+            {
+                "instructions": "Be brief.",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "run_shell",
+                        "description": "Run a shell command",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            },
+            "glm-5.2",
+            True,
+        )
+
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual(payload["stream"], True)
+        self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief."})
+        self.assertEqual(payload["messages"][1], {"role": "user", "content": "hello"})
+        self.assertEqual(payload["tools"][0]["function"]["name"], "run_shell")
+
+    def test_chat_adapter_translates_tool_calls_to_responses_function_calls(self) -> None:
+        response = cli_module.chat_response_to_responses(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_shell",
+                                        "arguments": "{\"cmd\":\"pwd\"}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            "glm-5.2",
+        )
+
+        self.assertEqual(response["output"][0]["type"], "function_call")
+        self.assertEqual(response["output"][0]["call_id"], "call_123")
+        self.assertEqual(response["output"][0]["name"], "run_shell")
+        self.assertEqual(response["output"][0]["arguments"], "{\"cmd\":\"pwd\"}")
+
     def test_configure_codex_rejects_duplicate_official_custom_model_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"

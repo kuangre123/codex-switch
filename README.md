@@ -2,22 +2,13 @@
 
 > One tiny macOS app for configuring Official OpenAI and custom API routes side by side in Codex, with Claude Code support too.
 
-Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it now keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's model catalog, and lets you choose the actual model inside Codex. It also supports Claude Code by updating its official Claude login/custom API route through `~/.claude/settings.json`.
-
-
-
-
-
-
-「「「「「「「「「「「「「「」」」」」」」待更新，因官方更新本项目需要升级，请稍后下载「「「「「「「「「「「「「「」」」」」」」
-
-
+Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's model catalog, and lets you choose the active route from Codex's own model picker. It can also run a local adapter that translates Codex Responses API requests to Chat Completions for OpenAI-compatible APIs that do not support Responses. Claude Code is supported by updating its official Claude login/custom API route through `~/.claude/settings.json`.
 
 Codex Switch 是一个很小的 macOS 工具，用来把 Codex 的官方 OpenAI 和自定义 API 并行配置到一起。它会注册自定义模型到 Codex 的模型目录，让用户直接在 Codex 里选择官方模型或自定义模型。它同时提供命令行和双击可用的 macOS App，每次保存都会备份配置，并保留官方 ChatGPT 登录态。
 
 它的核心特性是：Codex 侧不再强制“官方 / 自定义”二选一，而是把两类 provider 并行保留；Claude Code 侧继续支持官方 / 自定义路由配置。
 
-官方 OpenAI provider 使用 ChatGPT/OpenAI 登录。自定义 API provider 使用 API key，把请求转发到兼容 OpenAI 的接口，并通过模型目录显示为你自定义的名称，例如“我的模型”。
+官方 OpenAI provider 使用 ChatGPT/OpenAI 登录。自定义 API provider 使用 API key，把请求转发到兼容 OpenAI 的接口，并通过模型目录显示为你自定义的名称，例如“我的模型”。如果自定义接口只支持 Chat Completions，App 可以启用本地 adapter，把 Codex 的 Responses 请求转换过去。
 
 ## Download App 下载 app：
 
@@ -53,6 +44,7 @@ Codex can use multiple model providers, but configuring a custom provider by han
 - Official model can be selected from a preset menu or typed manually.
 - Codex custom providers are configured in parallel with Official OpenAI; users choose the actual model inside Codex.
 - Codex custom models are registered with the official `model_catalog_json` config path, including a custom display name.
+- Optional local adapter bridges Codex Responses API traffic to Chat Completions for compatible third-party APIs.
 - Custom API keys can be replaced from the app using a secure field; leave it blank to keep the saved key.
 - The app bundles its matching CLI, so app and command behavior stay in sync after updates.
 - No Python dependencies beyond the standard library.
@@ -106,7 +98,7 @@ The app has three actions:
 - **Status**: show current auth/provider/model.
 - **Settings**: edit custom API base URL, custom model, and official model.
 
-When saving Codex settings from the macOS app, Official OpenAI remains the default provider and the custom provider is added beside it. Codex.app is gracefully quit and reopened so the running app reloads the provider list and model catalog. Existing Codex threads are not rewritten.
+When saving Codex settings from the macOS app, Official OpenAI and the custom provider are both kept. The **Target Mode** selector decides which provider Codex should open with after saving. Codex.app is gracefully quit and reopened so the running app reloads the provider list and model catalog. Existing Codex threads are not rewritten.
 
 Claude Code switching updates `~/.claude/settings.json` under `env`:
 
@@ -150,10 +142,12 @@ codex-switch configure \
   --base-url https://jp.icodeeasy.cc \
   --custom-model my-gpt-5.5 \
   --custom-model-name "My Model" \
-  --official-model gpt-5.2-codex
+  --official-model gpt-5.5 \
+  --default-provider custom \
+  --chat-adapter
 ```
 
-`--custom-model` must be a unique model ID that is different from the official Codex model IDs. Codex de-duplicates models by ID, so using `gpt-5.5` for both the official and custom route will hide the custom display name. If your upstream API only accepts `gpt-5.5`, map the custom ID such as `my-gpt-5.5` back to the real upstream model in your API proxy.
+`--custom-model` must be a unique model ID that is different from the official Codex model IDs. Codex de-duplicates models by ID, so using `gpt-5.5` for both the official and custom route will hide the custom display name. `--chat-adapter` starts a local launchd service on `127.0.0.1:17638` and stores your real upstream URL separately, so Codex can speak Responses while your upstream API receives Chat Completions.
 
 Temporarily override the custom API endpoint:
 
@@ -219,7 +213,7 @@ model_catalog_json = "/Users/you/.codex/codex-switch-model-catalog.json"
 preferred_auth_method = "chatgpt"
 
 [model_providers.custom]
-base_url = "https://jp.icodeeasy.cc"
+base_url = "http://127.0.0.1:17638/v1"
 requires_openai_auth = true
 wire_api = "responses"
 models = ["your-model"]

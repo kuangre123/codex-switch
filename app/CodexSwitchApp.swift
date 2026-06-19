@@ -75,6 +75,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var localBaseURL = ""
     @Published var localModel = ""
     @Published var localModelDisplayName = ""
+    @Published var useChatAdapter = true
     @Published var replacementAPIKey = ""
     @Published var officialModel = ""
     @Published var output = ""
@@ -110,6 +111,7 @@ final class SwitchViewModel: ObservableObject {
                 self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
                 self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5")
                 self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
+                self.useChatAdapter = (values["chat_adapter"] ?? "true") != "false"
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if status.status != 0 || config.status != 0 {
                     self.output = [status.output, config.output].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -172,6 +174,7 @@ final class SwitchViewModel: ObservableObject {
         let baseURL = localBaseURL
         let local = localModel
         let displayName = localModelDisplayName
+        let useAdapter = useChatAdapter
         let replacementKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -182,6 +185,8 @@ final class SwitchViewModel: ObservableObject {
                     customModel: local,
                     displayName: displayName,
                     officialModel: official,
+                    mode: mode,
+                    useChatAdapter: useAdapter,
                     replacementKey: replacementKey
                 )
                 return
@@ -223,15 +228,20 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
-    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, replacementKey: String) {
+    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, mode: ProviderMode, useChatAdapter: Bool, replacementKey: String) {
+        let defaultProvider = mode == .custom ? "custom" : "openai"
         var arguments = [
             "configure",
             "--base-url", baseURL,
             "--custom-model", customModel,
             "--custom-model-name", displayName,
             "--official-model", officialModel,
+            "--default-provider", defaultProvider,
             "--restart-codex",
         ]
+        if useChatAdapter {
+            arguments.append("--chat-adapter")
+        }
         var switchInput: String?
         if !replacementKey.isEmpty {
             arguments.append("--api-key-stdin")
@@ -244,6 +254,7 @@ final class SwitchViewModel: ObservableObject {
             self.statusValues = self.parse(status.output)
             self.isBusy = false
             self.completedTarget = .codex
+            self.completedMode = mode
             if configured.status == 0 {
                 self.replacementAPIKey = ""
                 self.switchSucceeded = true
@@ -418,14 +429,14 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                if targetTool == .claude {
-                    Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
-                        Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
-                        Text(officialProviderTitle).tag(ProviderMode.official)
-                    }
-                    .pickerStyle(.segmented)
-                } else {
-                    Text(texts.text("并行配置：官方 OpenAI 和自定义 API 会同时保留，之后在 Codex 里选择模型。", "Parallel setup: Official OpenAI and the custom API are kept together; choose the model inside Codex."))
+                Picker(texts.text("目标模式", "Target Mode"), selection: $targetMode) {
+                    Text(texts.text("自定义 API", "Custom API")).tag(ProviderMode.custom)
+                    Text(officialProviderTitle).tag(ProviderMode.official)
+                }
+                .pickerStyle(.segmented)
+
+                if targetTool == .codex {
+                    Text(texts.text("官方和自定义 provider 会同时保留；这里选择保存后默认使用哪一路。", "Official and custom providers are both kept; choose which route is selected after saving."))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -451,6 +462,10 @@ struct ContentView: View {
                         if targetTool == .codex {
                             settingRow(texts.text("显示名称", "Display Name")) {
                                 TextField(texts.text("我的模型", "My Model"), text: $model.localModelDisplayName)
+                            }
+                            settingRow(texts.text("Chat 适配器", "Chat Adapter")) {
+                                Toggle(texts.text("把 Chat Completions 转成 Responses", "Bridge Chat Completions to Responses"), isOn: $model.useChatAdapter)
+                                    .toggleStyle(.checkbox)
                             }
                         }
                         settingRow(texts.text("新 API Key", "New API Key")) {
