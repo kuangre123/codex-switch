@@ -490,7 +490,7 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertEqual(response["output"][0]["name"], "run_shell")
         self.assertEqual(response["output"][0]["arguments"], "{\"cmd\":\"pwd\"}")
 
-    def test_configure_codex_rejects_duplicate_official_custom_model_id(self) -> None:
+    def test_configure_codex_allows_same_custom_and_official_model_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -516,10 +516,8 @@ class CodexSwitchTests(unittest.TestCase):
                 "gpt-5.5",
             )
 
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("Custom model ID must be different", result.stderr)
-            self.assertIn("display name will not appear", result.stderr)
-            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue((home / "codex-switch-model-catalog.json").exists())
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

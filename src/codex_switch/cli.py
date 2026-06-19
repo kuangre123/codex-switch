@@ -453,16 +453,7 @@ def official_model_slugs(home: Path) -> set[str]:
 
 
 def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: str | None = None) -> None:
-    reserved = official_model_slugs(home)
-    if official_model:
-        reserved.add(official_model)
-    if custom_model in reserved:
-        examples = "my-gpt-5.5 or jp/gpt-5.5"
-        raise SwitchError(
-            "Custom model ID must be different from official Codex model IDs. "
-            f"`{custom_model}` is already an official model slug, so Codex will de-duplicate it and the custom display name will not appear. "
-            f"Use a unique ID such as {examples}, and make sure your custom API or proxy accepts that model ID."
-        )
+    pass
 
 
 def historical_model_slugs(home: Path) -> list[str]:
@@ -827,6 +818,12 @@ def chat_response_to_responses(chat: dict[str, object], model: str) -> dict[str,
         maybe_message = choices[0].get("message")
         if isinstance(maybe_message, dict):
             message = maybe_message
+    raw_usage = chat.get("usage") or {}
+    usage = {
+        "input_tokens": raw_usage.get("input_tokens") or raw_usage.get("prompt_tokens") or 0,
+        "output_tokens": raw_usage.get("output_tokens") or raw_usage.get("completion_tokens") or 0,
+        "total_tokens": raw_usage.get("total_tokens") or 0,
+    }
     return {
         "id": f"resp_{uuid.uuid4().hex}",
         "object": "response",
@@ -834,7 +831,7 @@ def chat_response_to_responses(chat: dict[str, object], model: str) -> dict[str,
         "status": "completed",
         "model": model,
         "output": chat_message_to_response_output(message),
-        "usage": chat.get("usage"),
+        "usage": usage,
     }
 
 
