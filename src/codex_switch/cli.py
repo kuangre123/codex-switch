@@ -533,13 +533,26 @@ def custom_model_catalog(
             seen.add(slug)
 
     extras = list(additional_models or [])
-    extras.append((model, display_name))
     for slug, name in extras:
         if slug and slug not in seen:
             entry = custom_model_entry(slug, name or slug, template)
             entry["visibility"] = "list" if visible_provider == CUSTOM_PROVIDER_ID else "hide"
             models.append(entry)
             seen.add(slug)
+
+    if model:
+        vis = "list" if visible_provider == CUSTOM_PROVIDER_ID else "hide"
+        if model in seen:
+            for m in models:
+                if m.get("slug") == model:
+                    m["display_name"] = display_name
+                    m["visibility"] = vis
+                    break
+        else:
+            entry = custom_model_entry(model, display_name, template)
+            entry["visibility"] = vis
+            models.append(entry)
+            seen.add(model)
 
     return {"models": models}
 
