@@ -328,6 +328,7 @@ def rewrite_config_for_parallel(
     api_key: str,
     catalog_path: Path | None,
     default_provider: str = "openai",
+    skip_login: bool = False,
 ) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
@@ -337,11 +338,12 @@ def rewrite_config_for_parallel(
     else:
         selected_provider = "openai"
         selected_model = official_model
+    auth_method = "api-key" if skip_login else "chatgpt"
     for section, lines in sections:
         if section == "":
             lines = set_key(lines, "model_provider", selected_provider)
             lines = set_key(lines, "model", selected_model)
-            lines = set_key(lines, "preferred_auth_method", "chatgpt")
+            lines = set_key(lines, "preferred_auth_method", auth_method)
             if catalog_path is not None:
                 lines = set_key(lines, "model_catalog_json", str(catalog_path))
             else:
@@ -1277,10 +1279,16 @@ def configure_codex(args: argparse.Namespace) -> int:
     else:
         state["chat_adapter"] = "false"
         provider_base_url = base_url
+    skip_login = getattr(args, "skip_login", False)
+    state["skip_login"] = "true" if skip_login else "false"
     save_state(home, state)
 
     auth["OPENAI_API_KEY"] = api_key
-    auth["auth_mode"] = "chatgpt"
+    if skip_login:
+        auth["auth_mode"] = "api-key"
+        auth.pop("tokens", None)
+    else:
+        auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
     # The Codex picker has a single active provider, so the model catalog must
     # only expose models that route to it. In official mode we fall back to
@@ -1301,6 +1309,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         api_key,
         effective_catalog,
         default_provider,
+        skip_login,
     )
     atomic_write(config_path, config, 0o600)
 
@@ -1353,6 +1362,7 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     print(f"default_provider: {effective_setting(state, 'default_provider', 'openai')}")
     print(f"chat_adapter: {effective_setting(state, 'chat_adapter', 'false')}")
+    print(f"skip_login: {effective_setting(state, 'skip_login', 'false')}")
     print(f"adapter_upstream_base_url: {effective_setting(state, 'adapter_upstream_base_url', effective_setting(state, 'local_base_url', DEFAULT_BASE_URL))}")
     return 0
 
@@ -1634,6 +1644,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving. Defaults to saved setting or openai.")
     configure.add_argument("--chat-adapter", action="store_true", help="Route Codex Responses API traffic through the local chat-completions adapter.")
+    configure.add_argument("--skip-login", action="store_true", help="Bypass ChatGPT OAuth login by using API-key auth mode.")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
     configure.set_defaults(func=configure_codex)
 
