@@ -524,10 +524,14 @@ def custom_model_catalog(
     models = list(official)
     seen = set(by_slug)
 
-    # Preserve historical models referenced by saved conversations.
+    # Preserve historical models referenced by saved conversations, but hide
+    # them from the picker so it isn't cluttered with old/experimental slugs.
+    # They stay in the catalog only so those conversations still resolve.
     for slug in historical_model_slugs(home):
         if slug and slug not in seen and slug != model:
-            models.append(custom_model_entry(slug, slug, template))
+            entry = custom_model_entry(slug, slug, template)
+            entry["visibility"] = "hide"
+            models.append(entry)
             seen.add(slug)
 
     extras = list(additional_models or [])

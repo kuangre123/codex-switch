@@ -420,8 +420,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("glm-5.2", slugs)
             historical = next(m for m in catalog["models"] if m["slug"] == "gpt-5.2-codex")
             self.assertEqual(historical["shell_type"], "shell_command")
+            # Historical models are hidden from the picker (only kept for resolution).
+            self.assertEqual(historical["visibility"], "hide")
             custom = next(m for m in catalog["models"] if m["slug"] == "glm-5.2")
             self.assertEqual(custom["display_name"], "我的GPT")
+            # The custom model stays visible in the picker.
+            self.assertNotEqual(custom.get("visibility"), "hide")
 
     def test_responses_adapter_translates_basic_request_to_chat_payload(self) -> None:
         payload = cli_module.responses_request_to_chat_payload(
