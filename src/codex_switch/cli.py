@@ -693,6 +693,13 @@ def chat_completions_url(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def responses_url(base_url: str) -> str:
+    base = strip_trailing_slash(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/responses"
+    return f"{base}/v1/responses"
+
+
 def response_content_to_text(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -924,6 +931,14 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 chat = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if "/v1/responses" in error_body or "responses" in error_body.lower():
+                result = self.passthrough_responses(request, upstream_base_url, upstream_model, api_key, resp_id, stream)
+                if result is not None:
+                    if stream:
+                        self.write_response_stream(result)
+                    else:
+                        self.send_json(200, result)
+                    return
             if stream:
                 self.write_sse("response.failed", {
                     "type": "response.failed",
@@ -949,6 +964,40 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             self.write_response_stream(result)
             return
         self.send_json(200, result)
+
+    def passthrough_responses(
+        self, request: dict[str, object],
+        upstream_base_url: str, upstream_model: str,
+        api_key: str, resp_id: str, stream: bool,
+    ) -> dict[str, object] | None:
+        passthrough_body = dict(request)
+        passthrough_body["model"] = upstream_model
+        passthrough_body["stream"] = False
+        upstream_req = urllib.request.Request(
+            responses_url(upstream_base_url),
+            data=json.dumps(passthrough_body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(upstream_req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(result, dict):
+            return None
+        result["id"] = resp_id
+        raw_usage = result.get("usage") or {}
+        if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
+            result["usage"] = {
+                "input_tokens": raw_usage.get("input_tokens") or raw_usage.get("prompt_tokens") or 0,
+                "output_tokens": raw_usage.get("output_tokens") or raw_usage.get("completion_tokens") or 0,
+                "total_tokens": raw_usage.get("total_tokens") or 0,
+            }
+        return result
 
     def write_sse(self, event: str, payload: dict[str, object]) -> None:
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
