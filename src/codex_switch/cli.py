@@ -920,7 +920,28 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         if self.path in {"/health", "/v1/health"}:
             self.send_json(200, {"status": "ok"})
             return
+        if self.path in {"/models", "/v1/models"}:
+            self._serve_models()
+            return
         self.send_json(404, {"error": {"message": "not found"}})
+
+    def _serve_models(self) -> None:
+        state = load_state(self.server.home)
+        model = effective_setting(state, "adapter_upstream_model", effective_setting(state, "local_model", DEFAULT_MODEL))
+        display = effective_setting(state, "local_model_display_name", model)
+        ts = int(time.time())
+        self.send_json(200, {
+            "object": "list",
+            "data": [
+                {
+                    "id": model,
+                    "object": "model",
+                    "created": ts,
+                    "owned_by": "custom",
+                    "name": display,
+                },
+            ],
+        })
 
     def do_POST(self) -> None:
         if self.path not in {"/responses", "/v1/responses"}:
