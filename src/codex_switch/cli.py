@@ -993,8 +993,14 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         resp_id = f"resp_{uuid.uuid4().hex}"
 
         if stream:
-            # Send SSE headers and initial event immediately so Codex
-            # knows the connection is alive while we wait for upstream.
+            # Prefer relaying the upstream's native /v1/responses SSE stream so
+            # reasoning/output streams in real time. The chat-completions bridge
+            # buffers the entire turn (stream=False upstream), which makes Codex
+            # sit on "thinking" and interrupt on long reasoning. Fall back to the
+            # bridge only if the upstream can't stream responses.
+            if self.relay_responses_stream(request, upstream_base_url, upstream_model, api_key):
+                return
+            # Fallback: emit our own SSE while we convert chat-completions output.
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1097,6 +1103,57 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 "total_tokens": raw_usage.get("total_tokens") or 0,
             }
         return result
+
+    def relay_responses_stream(
+        self, request: dict[str, object],
+        upstream_base_url: str, upstream_model: str, api_key: str,
+    ) -> bool:
+        """Relay the upstream's native /v1/responses SSE stream straight to Codex.
+
+        Returns True if the relay handled the response (headers + body written),
+        or False if the upstream did not return an event stream, so the caller
+        can fall back to the chat-completions bridge.
+        """
+        body = dict(request)
+        body["model"] = upstream_model
+        body["stream"] = True
+        upstream_req = urllib.request.Request(
+            responses_url(upstream_base_url),
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            response = urllib.request.urlopen(upstream_req, timeout=600)
+        except Exception:
+            return False
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in content_type:
+            try:
+                response.close()
+            except Exception:
+                pass
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            for chunk in response:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+        return True
 
     def write_sse(self, event: str, payload: dict[str, object]) -> None:
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
