@@ -380,6 +380,17 @@ def configured_provider(content: str) -> str:
     return "openai"
 
 
+def configured_model(content: str) -> str:
+    for section, lines in split_toml_sections(content):
+        if section != "":
+            continue
+        for line in lines:
+            match = re.match(r'^\s*model\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    return DEFAULT_OFFICIAL_MODEL
+
+
 def model_catalog_path(home: Path) -> Path:
     return home / MODEL_CATALOG_NAME
 
@@ -611,7 +622,7 @@ def rollout_files(home: Path) -> list[Path]:
     return sorted(files)
 
 
-def rewrite_rollout_provider(path: Path, provider: str) -> RolloutSyncInfo:
+def rewrite_rollout_provider(path: Path, provider: str, model: str) -> RolloutSyncInfo:
     info = RolloutSyncInfo()
     try:
         text = path.read_text(encoding="utf-8")
@@ -637,8 +648,14 @@ def rewrite_rollout_provider(path: Path, provider: str) -> RolloutSyncInfo:
                 info.thread_id = payload["id"]
             if info.cwd is None and isinstance(payload.get("cwd"), str):
                 info.cwd = payload["cwd"]
+            changed = False
             if payload.get("model_provider") != provider:
                 payload["model_provider"] = provider
+                changed = True
+            if payload.get("model") != model:
+                payload["model"] = model
+                changed = True
+            if changed:
                 next_line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
                 info.changed = True
         output.append(next_line + ending)
@@ -663,7 +680,7 @@ def sqlite_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
-def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncInfo]) -> int:
+def sync_sqlite_provider(home: Path, provider: str, model: str, rollouts: list[RolloutSyncInfo]) -> int:
     databases = list((home / "sqlite").glob("state_*.sqlite"))
     databases.extend(home.glob("state_*.sqlite"))
     updated = 0
@@ -681,6 +698,12 @@ def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncIn
                     (provider, provider),
                 )
                 updated += cursor.rowcount if cursor.rowcount is not None else 0
+                if "model" in columns:
+                    cursor = connection.execute(
+                        "UPDATE threads SET model = ? WHERE COALESCE(model, '') <> ?",
+                        (model, model),
+                    )
+                    updated += cursor.rowcount if cursor.rowcount is not None else 0
                 if "has_user_event" in columns:
                     for thread_id in user_event_thread_ids:
                         cursor = connection.execute(
@@ -699,23 +722,23 @@ def sync_sqlite_provider(home: Path, provider: str, rollouts: list[RolloutSyncIn
             finally:
                 connection.close()
         except sqlite3.Error as exc:
-            raise SwitchError(f"Could not sync thread provider in {database}: {exc}") from exc
+            raise SwitchError(f"Could not sync thread provider/model in {database}: {exc}") from exc
     return updated
 
 
-def sync_provider_metadata(home: Path, provider: str) -> tuple[int, int, Path]:
+def sync_provider_metadata(home: Path, provider: str, model: str) -> tuple[int, int, Path]:
     backup_dir = provider_sync_backup(home)
-    rollouts = [rewrite_rollout_provider(path, provider) for path in rollout_files(home)]
+    rollouts = [rewrite_rollout_provider(path, provider, model) for path in rollout_files(home)]
     changed_rollouts = sum(1 for info in rollouts if info.changed)
-    sqlite_rows = sync_sqlite_provider(home, provider, rollouts)
+    sqlite_rows = sync_sqlite_provider(home, provider, model, rollouts)
     return changed_rollouts, sqlite_rows, backup_dir
 
 
-def print_migration(home: Path, provider: str, _model: str, args: argparse.Namespace) -> None:
+def print_migration(home: Path, provider: str, model: str, args: argparse.Namespace) -> None:
     if not getattr(args, "migrate_latest", False):
         return
-    changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, provider)
-    print(f"Provider-synced existing thread context to {provider}.")
+    changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, provider, model)
+    print(f"Provider/model-synced existing thread context to {provider}/{model}.")
     print(f"changed_session_files: {changed_rollouts}")
     print(f"sqlite_rows_updated: {sqlite_rows}")
     print(f"provider_sync_backup: {backup_dir}")
@@ -1089,6 +1112,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 in_progress = dict(item)
                 in_progress["status"] = "in_progress"
                 item_id = str(item.get("id") or f"item_{uuid.uuid4().hex}")
+                in_progress["id"] = item_id
                 self.write_sse("response.output_item.added", {"type": "response.output_item.added", "output_index": index, "item": in_progress})
                 if item.get("type") == "message":
                     content = item.get("content")
@@ -1102,6 +1126,13 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                                 self.write_sse("response.output_text.delta", {"type": "response.output_text.delta", "output_index": index, "content_index": content_index, "item_id": item_id, "delta": text})
                                 self.write_sse("response.output_text.done", {"type": "response.output_text.done", "output_index": index, "content_index": content_index, "item_id": item_id, "text": text})
                             self.write_sse("response.content_part.done", {"type": "response.content_part.done", "output_index": index, "content_index": content_index, "item_id": item_id, "part": part})
+                elif item.get("type") == "function_call":
+                    arguments = item.get("arguments")
+                    if not isinstance(arguments, str):
+                        arguments = "{}"
+                    if arguments:
+                        self.write_sse("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "output_index": index, "item_id": item_id, "delta": arguments})
+                    self.write_sse("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "output_index": index, "item_id": item_id, "arguments": arguments})
                 self.write_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": index, "item": item})
         self.write_sse("response.completed", {"type": "response.completed", "response": response_payload})
         self.wfile.write(b"data: [DONE]\n\n")
@@ -1170,7 +1201,7 @@ def start_adapter_launch_agent(home: Path) -> Path:
     return path
 
 
-def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str) -> None:
+def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, expected_model: str) -> None:
     if not getattr(args, "restart_codex", False):
         return
     subprocess.run(
@@ -1182,30 +1213,33 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str) 
     time.sleep(1.5)
     # Codex is now down, so the thread databases are unlocked. The desktop app
     # filters the conversation list by model_provider, so re-tag every saved
-    # conversation to the active provider; otherwise switching providers hides
-    # all conversations created under the other one.
+    # conversation to the active provider/model; otherwise switching providers
+    # can restore a thread with a model that belongs to the other provider.
     try:
-        changed_rollouts, sqlite_rows, _ = sync_provider_metadata(home, expected_provider)
+        changed_rollouts, sqlite_rows, _ = sync_provider_metadata(home, expected_provider, expected_model)
         if changed_rollouts or sqlite_rows:
             print(
-                f"Synced existing conversations to provider {expected_provider} "
+                f"Synced existing conversations to provider/model {expected_provider}/{expected_model} "
                 f"({changed_rollouts} session files, {sqlite_rows} database rows)."
             )
     except SwitchError as exc:
         print(f"Warning: could not sync conversation provider metadata: {exc}")
     subprocess.run(["open", "-a", "Codex"], check=True)
     time.sleep(RESTART_SETTLE_SECONDS)
-    actual_provider = configured_provider(read_config(home / "config.toml"))
-    if actual_provider != expected_provider:
+    config = read_config(home / "config.toml")
+    actual_provider = configured_provider(config)
+    actual_model = configured_model(config)
+    if actual_provider != expected_provider or actual_model != expected_model:
         repair_summary = ""
         if getattr(args, "migrate_latest", False):
-            changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, actual_provider)
+            changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, actual_provider, actual_model)
             repair_summary = (
-                f" Restored thread metadata to {actual_provider} "
+                f" Restored thread metadata to {actual_provider}/{actual_model} "
                 f"({changed_rollouts} session files, {sqlite_rows} database rows; backup: {backup_dir})."
             )
         raise SwitchError(
-            f"Codex restarted with provider {actual_provider}, not {expected_provider}."
+            f"Codex restarted with provider/model {actual_provider}/{actual_model}, "
+            f"not {expected_provider}/{expected_model}."
             f"{repair_summary}"
         )
     print("Restarted Codex.app to reload the selected provider.")
@@ -1258,7 +1292,7 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
-    restart_codex(args, home, "custom")
+    restart_codex(args, home, "custom", model)
     return 0
 
 
@@ -1289,7 +1323,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print(f"backup_dir: {backup_dir}")
     print("Existing ChatGPT login tokens, custom API key, and custom model catalog were preserved.")
     print_migration(home, "openai", model, args)
-    restart_codex(args, home, "openai")
+    restart_codex(args, home, "openai", model)
     return 0
 
 
@@ -1357,14 +1391,19 @@ def configure_codex(args: argparse.Namespace) -> int:
     write_auth(auth_path, auth)
     # The Codex picker has a single active provider, so the model catalog must
     # only expose models that route to it. In official mode we fall back to
-    # Codex's built-in catalog (no custom file); in custom mode the catalog
-    # lists ONLY the custom model so an official model can't be picked and then
-    # force-routed through the custom proxy/adapter.
-    # Always write the superset catalog (official + historical + custom) so every
-    # model resolves in both the desktop app and the CLI profiles, regardless of
-    # which provider is the default.
-    write_model_catalog(catalog_path, custom_model, display_name, [(official_model, official_model)], visible_provider=default_provider)
-    effective_catalog: Path | None = catalog_path
+    # A custom model_catalog_json REPLACES Codex's built-in catalog, so writing
+    # one in official mode would shrink the official model list to only the few
+    # entries we know about (losing gpt-5.5, gpt-5.3-codex, etc.). Therefore:
+    #   - official mode: remove our catalog and let Codex use its built-in list.
+    #   - custom mode: write a catalog exposing only the custom model so the
+    #     picker routes correctly through the custom provider/adapter.
+    if default_provider == CUSTOM_PROVIDER_ID:
+        write_model_catalog(catalog_path, custom_model, display_name, visible_provider=default_provider)
+        effective_catalog: Path | None = catalog_path
+    else:
+        if catalog_path.exists():
+            catalog_path.unlink()
+        effective_catalog = None
     adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
     config = rewrite_config_for_parallel(
         read_config(config_path),
@@ -1392,7 +1431,8 @@ def configure_codex(args: argparse.Namespace) -> int:
     print(f"model_catalog_json: {effective_catalog if effective_catalog is not None else '(built-in)'}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
-    restart_codex(args, home, default_provider)
+    selected_model = official_model if default_provider == "openai" else custom_model
+    restart_codex(args, home, default_provider, selected_model)
     return 0
 
 

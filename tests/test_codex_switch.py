@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import stat
 import subprocess
@@ -93,6 +94,7 @@ def write_thread_database(home: Path) -> None:
             CREATE TABLE threads (
                 id TEXT PRIMARY KEY,
                 model_provider TEXT NOT NULL,
+                model TEXT NOT NULL,
                 cwd TEXT,
                 updated_at INTEGER NOT NULL,
                 updated_at_ms INTEGER,
@@ -102,26 +104,28 @@ def write_thread_database(home: Path) -> None:
             """
         )
         connection.executemany(
-            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("older-official", "openai", None, 10, 10000, 0, 0),
-                ("current-custom", "custom", None, 20, 20000, 0, 0),
-                ("latest-official", "openai", None, 30, 30000, 0, 0),
-                ("archived-official", "openai", None, 40, 40000, 0, 1),
+                ("older-official", "openai", "gpt-5.5", None, 10, 10000, 0, 0),
+                ("current-custom", "custom", "codex-switch/gpt-5.5", None, 20, 20000, 0, 0),
+                ("latest-official", "openai", "gpt-5.5", None, 30, 30000, 0, 0),
+                ("archived-official", "openai", "gpt-5.5", None, 40, 40000, 0, 1),
             ],
         )
         connection.commit()
 
 
-def write_rollout(home: Path, thread_id: str, provider: str, user_event: bool = False) -> Path:
+def write_rollout(home: Path, thread_id: str, provider: str, user_event: bool = False, model: str | None = None) -> Path:
     path = home / "sessions" / "2026" / "06" / "15" / f"rollout-test-{thread_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if model is None:
+        model = "codex-switch/gpt-5.5" if provider == "custom" else "gpt-5.5"
     path.write_text(
         json.dumps(
             {
                 "timestamp": "2026-06-15T00:00:00Z",
                 "type": "session_meta",
-                "payload": {"id": thread_id, "cwd": "/tmp/example", "model_provider": provider},
+                "payload": {"id": thread_id, "cwd": "/tmp/example", "model_provider": provider, "model": model},
             },
             separators=(",", ":"),
         )
@@ -330,10 +334,11 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model = "gpt-official"', config)
             self.assertIn('base_url = "https://custom.example/v1"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
-            # The superset catalog is always written so every model resolves in
-            # both the desktop app and the CLI profiles.
-            self.assertIn('model_catalog_json = "', config)
-            self.assertTrue((home / "codex-switch-model-catalog.json").exists())
+            # Official default mode must use Codex's built-in catalog so the
+            # full official model list is preserved.
+            self.assertNotIn('model_catalog_json = "', config)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
+            self.assertIn("model_catalog_json: (built-in)", result.stdout)
             # CLI parity: both routes are available as Codex profiles regardless
             # of which provider is the desktop default.
             self.assertIn('[profiles.ccswitch]', config)
@@ -491,6 +496,33 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertEqual(response["output"][0]["name"], "run_shell")
         self.assertEqual(response["output"][0]["arguments"], "{\"cmd\":\"pwd\"}")
 
+    def test_chat_adapter_streams_function_call_arguments_events(self) -> None:
+        handler = cli_module.AdapterHandler.__new__(cli_module.AdapterHandler)
+        handler.wfile = io.BytesIO()
+        handler.write_response_stream(
+            {
+                "id": "resp_test",
+                "object": "response",
+                "status": "completed",
+                "model": "glm-5.2",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_test",
+                        "call_id": "call_123",
+                        "name": "run_shell",
+                        "arguments": "{\"cmd\":\"pwd\"}",
+                        "status": "completed",
+                    }
+                ],
+            }
+        )
+
+        stream = handler.wfile.getvalue().decode("utf-8")
+        self.assertIn("event: response.function_call_arguments.delta", stream)
+        self.assertIn("event: response.function_call_arguments.done", stream)
+        self.assertIn("\"arguments\": \"{\\\"cmd\\\":\\\"pwd\\\"}\"", stream)
+
     def test_configure_codex_maps_duplicate_upstream_model_to_safe_custom_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -596,15 +628,18 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "local", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider-synced existing thread context to custom.", result.stdout)
+            self.assertIn("Provider/model-synced existing thread context to custom/gpt-5.5.", result.stdout)
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "custom")
+            self.assertEqual(meta["payload"]["model"], "gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
                 cwd, has_user_event = connection.execute(
                     "SELECT cwd, has_user_event FROM threads WHERE id = 'latest-official'"
                 ).fetchone()
             self.assertEqual(providers, {"custom"})
+            self.assertEqual(models, {"gpt-5.5"})
             self.assertEqual(cwd, "/tmp/example")
             self.assertEqual(has_user_event, 1)
 
@@ -626,7 +661,7 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "local", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider-synced existing thread context to custom.", result.stdout)
+            self.assertIn("Provider/model-synced existing thread context to custom/gpt-5.5.", result.stdout)
 
     def test_official_switch_provider_syncs_existing_thread_to_openai(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -642,12 +677,15 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "official", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider-synced existing thread context to openai.", result.stdout)
+            self.assertIn("Provider/model-synced existing thread context to openai/gpt-5.5.", result.stdout)
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "openai")
+            self.assertEqual(meta["payload"]["model"], "gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
             self.assertEqual(providers, {"openai"})
+            self.assertEqual(models, {"gpt-5.5"})
 
     def test_local_switch_uses_public_default_api_address(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -897,12 +935,14 @@ class CodexSwitchTests(unittest.TestCase):
             args = SimpleNamespace(restart_codex=True, migrate_latest=False)
 
             with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
-                cli_module.restart_codex(args, home, "custom")
+                cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
-            # Every thread, including the previously openai-tagged ones, is now custom.
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
+            # Every thread, including the previously openai-tagged ones, is now custom/gpt-5.5.
             self.assertEqual(providers, {"custom"})
+            self.assertEqual(models, {"gpt-5.5"})
 
     def test_restart_repairs_thread_metadata_when_codex_reverts_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -913,14 +953,17 @@ class CodexSwitchTests(unittest.TestCase):
             args = SimpleNamespace(restart_codex=True, migrate_latest=True)
 
             with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
-                with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider openai, not custom"):
-                    cli_module.restart_codex(args, home, "custom")
+                with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider/model openai/gpt-5, not custom/gpt-5.5"):
+                    cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "openai")
+            self.assertEqual(meta["payload"]["model"], "gpt-5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
             self.assertEqual(providers, {"openai"})
+            self.assertEqual(models, {"gpt-5"})
 
 
 if __name__ == "__main__":
