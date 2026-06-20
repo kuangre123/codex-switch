@@ -110,7 +110,7 @@ final class SwitchViewModel: ObservableObject {
                 self.statusValues = self.parse(status.output)
                 let values = self.parse(config.output)
                 self.localBaseURL = values["local_base_url"] ?? (target == .claude ? "http://127.0.0.1:15721" : "https://jp.icodeeasy.cc")
-                self.localModel = values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "my-gpt-5.5")
+                self.localModel = values["local_upstream_model"] ?? values["local_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
                 self.useChatAdapter = (values["chat_adapter"] ?? "true") != "false"
                 self.skipLogin = (values["skip_login"] ?? "false") == "true"
@@ -471,7 +471,7 @@ struct ContentView: View {
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
-                        settingRow(texts.text("自定义模型 ID", "Custom Model ID")) {
+                        settingRow(texts.text(targetTool == .codex ? "上游模型 ID" : "自定义模型 ID", targetTool == .codex ? "Upstream Model ID" : "Custom Model ID")) {
                             TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
                         }
                         if targetTool == .codex {

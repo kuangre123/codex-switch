@@ -381,6 +381,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('models = ["vendor/custom-model"]', config)
             self.assertIn('model_catalog_json = "', config)
             self.assertEqual(read_state(home)["default_provider"], "custom")
+            self.assertEqual(read_state(home)["local_upstream_model"], "vendor/custom-model")
             # Custom mode writes a catalog that is a SUPERSET: official models are
             # kept (so saved conversations still resolve) and the custom model is
             # appended with its display name. model_catalog_json replaces Codex's
@@ -490,7 +491,7 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertEqual(response["output"][0]["name"], "run_shell")
         self.assertEqual(response["output"][0]["arguments"], "{\"cmd\":\"pwd\"}")
 
-    def test_configure_codex_allows_same_custom_and_official_model_id(self) -> None:
+    def test_configure_codex_maps_duplicate_upstream_model_to_safe_custom_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -514,10 +515,25 @@ class CodexSwitchTests(unittest.TestCase):
                 "我的模型",
                 "--official-model",
                 "gpt-5.5",
+                "--default-provider",
+                "custom",
+                "--chat-adapter",
             )
 
-            self.assertEqual(result.returncode, 0)
-            self.assertTrue((home / "codex-switch-model-catalog.json").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('model_provider = "custom"', config)
+            self.assertIn('model = "codex-switch/gpt-5.5"', config)
+            self.assertIn('models = ["codex-switch/gpt-5.5"]', config)
+            state = read_state(home)
+            self.assertEqual(state["local_model"], "codex-switch/gpt-5.5")
+            self.assertEqual(state["local_upstream_model"], "gpt-5.5")
+            self.assertEqual(state["adapter_upstream_model"], "gpt-5.5")
+            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
+            official = next(m for m in catalog["models"] if m["slug"] == "gpt-5.5")
+            custom = next(m for m in catalog["models"] if m["slug"] == "codex-switch/gpt-5.5")
+            self.assertEqual(official["display_name"], "GPT-5.5")
+            self.assertEqual(custom["display_name"], "我的模型")
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -29,7 +29,9 @@ from xml.sax.saxutils import escape as xml_escape
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
-DEFAULT_CUSTOM_MODEL = "my-gpt-5.5"
+CUSTOM_MODEL_SLUG_PREFIX = "codex-switch/"
+DEFAULT_CUSTOM_MODEL = f"{CUSTOM_MODEL_SLUG_PREFIX}gpt-5.5"
+DEFAULT_UPSTREAM_MODEL = "gpt-5.5"
 DEFAULT_ADAPTER_HOST = "127.0.0.1"
 DEFAULT_ADAPTER_PORT = 17638
 DEFAULT_ADAPTER_BASE_URL = f"http://{DEFAULT_ADAPTER_HOST}:{DEFAULT_ADAPTER_PORT}/v1"
@@ -37,7 +39,7 @@ CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
 RESTART_SETTLE_SECONDS = 3.0
-CONFIG_KEYS = ("local_base_url", "local_model", "official_model")
+CONFIG_KEYS = ("local_base_url", "local_model", "local_upstream_model", "official_model")
 CUSTOM_PROVIDER_ID = "custom"
 MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
 
@@ -456,7 +458,34 @@ def official_model_slugs(home: Path) -> set[str]:
 
 
 def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: str | None = None) -> None:
-    pass
+    reserved = official_model_slugs(home)
+    if official_model:
+        reserved.add(official_model)
+    if custom_model in reserved:
+        raise SwitchError(
+            "Codex custom model ID must be different from official model IDs. "
+            f"`{custom_model}` is already reserved. Use an internal ID such as "
+            f"`{CUSTOM_MODEL_SLUG_PREFIX}{custom_model}` and map it to the real upstream model."
+        )
+
+
+def custom_slug_for_upstream(home: Path, upstream_model: str, official_model: str | None = None) -> str:
+    """Return a Codex-visible custom slug that cannot collide with official models."""
+    candidate = upstream_model.strip()
+    if not candidate:
+        raise SwitchError("custom model cannot be empty")
+    reserved = official_model_slugs(home)
+    if official_model:
+        reserved.add(official_model)
+    if candidate.startswith(CUSTOM_MODEL_SLUG_PREFIX) and candidate not in reserved:
+        return candidate
+    if candidate in reserved:
+        return f"{CUSTOM_MODEL_SLUG_PREFIX}{candidate}"
+    return candidate
+
+
+def upstream_model_for_state(state: dict[str, object], fallback: str) -> str:
+    return effective_setting(state, "local_upstream_model", effective_setting(state, "adapter_upstream_model", fallback))
 
 
 def historical_model_slugs(home: Path) -> list[str]:
@@ -506,6 +535,11 @@ def custom_model_catalog(
     # custom model with its user-defined display name.
     official = load_official_models(home)
     by_slug = {item.get("slug"): item for item in official if isinstance(item.get("slug"), str)}
+    if model and model in by_slug:
+        raise SwitchError(
+            f"Custom model ID `{model}` collides with an official Codex model. "
+            f"Use `{CUSTOM_MODEL_SLUG_PREFIX}{model}` for the Codex-visible ID."
+        )
 
     # Clone a real official model so synthesized entries carry every required field.
     template: dict[str, object] | None = None
@@ -545,17 +579,10 @@ def custom_model_catalog(
 
     if model:
         vis = "list" if visible_provider == CUSTOM_PROVIDER_ID else "hide"
-        if model in seen:
-            for m in models:
-                if m.get("slug") == model:
-                    m["display_name"] = display_name
-                    m["visibility"] = vis
-                    break
-        else:
-            entry = custom_model_entry(model, display_name, template)
-            entry["visibility"] = vis
-            models.append(entry)
-            seen.add(model)
+        entry = custom_model_entry(model, display_name, template)
+        entry["visibility"] = vis
+        models.append(entry)
+        seen.add(model)
 
     return {"models": models}
 
@@ -901,7 +928,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_models(self) -> None:
         state = load_state(self.server.home)
-        model = effective_setting(state, "adapter_upstream_model", effective_setting(state, "local_model", DEFAULT_MODEL))
+        model = effective_setting(state, "local_model", DEFAULT_CUSTOM_MODEL)
         display = effective_setting(state, "local_model_display_name", model)
         ts = int(time.time())
         self.send_json(200, {
@@ -935,7 +962,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         state = load_state(self.server.home)
         auth = load_auth(self.server.home / "auth.json")
         upstream_base_url = effective_setting(state, "adapter_upstream_base_url", effective_setting(state, "local_base_url", DEFAULT_BASE_URL))
-        upstream_model = effective_setting(state, "adapter_upstream_model", effective_setting(state, "local_model", DEFAULT_MODEL))
+        upstream_model = upstream_model_for_state(state, DEFAULT_UPSTREAM_MODEL)
         api_key = effective_setting(state, "local_api_key", str(auth.get("OPENAI_API_KEY") or ""))
         if not api_key:
             raise SwitchError("adapter API key is missing")
@@ -1277,13 +1304,16 @@ def configure_codex(args: argparse.Namespace) -> int:
     state = load_state(home)
     remember_current_auth(home, auth, state)
     base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
-    custom_model = args.custom_model or args.model or effective_setting(state, "local_model", DEFAULT_CUSTOM_MODEL)
-    display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", custom_model)
+    requested_model = args.custom_model or args.model or upstream_model_for_state(state, DEFAULT_UPSTREAM_MODEL)
+    display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", requested_model)
     official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
     default_provider = args.default_provider or effective_setting(state, "default_provider", "openai")
     if default_provider not in {"openai", CUSTOM_PROVIDER_ID}:
         raise SwitchError("default_provider must be openai or custom")
+    custom_model = args.custom_model_slug or custom_slug_for_upstream(home, requested_model, official_model)
     ensure_distinct_custom_model(home, custom_model, official_model)
+    if not display_name:
+        display_name = requested_model
     cached_key = state.get("local_api_key")
     stdin_key = ""
     if getattr(args, "api_key_stdin", False):
@@ -1302,13 +1332,14 @@ def configure_codex(args: argparse.Namespace) -> int:
     state["local_api_key"] = api_key
     state["local_base_url"] = base_url
     state["local_model"] = custom_model
+    state["local_upstream_model"] = requested_model
     state["local_model_display_name"] = display_name
     state["official_model"] = official_model
     state["default_provider"] = default_provider
     if getattr(args, "chat_adapter", False):
         state["chat_adapter"] = "true"
         state["adapter_upstream_base_url"] = base_url
-        state["adapter_upstream_model"] = custom_model
+        state["adapter_upstream_model"] = requested_model
         provider_base_url = DEFAULT_ADAPTER_BASE_URL
     else:
         state["chat_adapter"] = "false"
@@ -1356,6 +1387,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         print(f"adapter_upstream_base_url: {base_url}")
         print(f"adapter_launch_agent: {adapter_plist}")
     print(f"custom_model: {custom_model}")
+    print(f"upstream_model: {requested_model}")
     print(f"custom_model_name: {display_name}")
     print(f"model_catalog_json: {effective_catalog if effective_catalog is not None else '(built-in)'}")
     print(f"api_key: {redacted_key(api_key)}")
@@ -1392,6 +1424,7 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"codex_home: {home}")
     print(f"local_base_url: {effective_setting(state, 'local_base_url', DEFAULT_BASE_URL)}")
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL)}")
+    print(f"local_upstream_model: {upstream_model_for_state(state, DEFAULT_UPSTREAM_MODEL)}")
     print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL))}")
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     print(f"default_provider: {effective_setting(state, 'default_provider', 'openai')}")
@@ -1407,6 +1440,7 @@ def config_set(args: argparse.Namespace) -> int:
     updates = {
         "local_base_url": args.local_base_url,
         "local_model": args.local_model,
+        "local_upstream_model": args.local_upstream_model,
         "local_model_display_name": args.local_model_display_name,
         "official_model": args.official_model,
         "default_provider": args.default_provider,
@@ -1661,7 +1695,8 @@ def build_parser() -> argparse.ArgumentParser:
     config_show_parser.set_defaults(func=config_show)
     config_set_parser = config_subparsers.add_parser("set", help="Update saved switch defaults.")
     config_set_parser.add_argument("--local-base-url", help="Default local relay API base URL.")
-    config_set_parser.add_argument("--local-model", help="Default local model.")
+    config_set_parser.add_argument("--local-model", help="Default Codex-visible custom model ID.")
+    config_set_parser.add_argument("--local-upstream-model", help="Default upstream model ID sent to the custom API.")
     config_set_parser.add_argument("--local-model-display-name", help="Display name for the custom Codex model.")
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving.")
@@ -1673,7 +1708,8 @@ def build_parser() -> argparse.ArgumentParser:
     configure_key_source.add_argument("--api-key-stdin", action="store_true", help="Read a replacement API key from stdin.")
     configure.add_argument("--base-url", help=f"Custom API base URL. Default: saved setting or {DEFAULT_BASE_URL}")
     configure.add_argument("--model", help=argparse.SUPPRESS)
-    configure.add_argument("--custom-model", help=f"Custom model slug. Must be different from official Codex model IDs. Default: saved setting or {DEFAULT_CUSTOM_MODEL}")
+    configure.add_argument("--custom-model", help=f"Upstream model ID sent to the custom API. Default: saved setting or {DEFAULT_UPSTREAM_MODEL}")
+    configure.add_argument("--custom-model-slug", help="Optional Codex-visible custom model ID. Auto-generated when omitted.")
     configure.add_argument("--custom-model-name", help="Display name for the custom model.")
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving. Defaults to saved setting or openai.")

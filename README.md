@@ -52,6 +52,7 @@ Codex can use multiple model providers, but configuring a custom provider by han
 - Official model can be selected from a preset menu or typed manually.
 - Codex custom providers are configured in parallel with Official OpenAI; users choose the actual model inside Codex.
 - Codex custom models are registered with the official `model_catalog_json` config path, including a custom display name.
+- Custom upstream model IDs may match official names such as `gpt-5.5`; Codex Switch automatically maps them to a safe Codex-visible ID like `codex-switch/gpt-5.5`.
 - Optional local adapter bridges Codex Responses API traffic to Chat Completions for compatible third-party APIs; streams SSE headers immediately to prevent Codex timeout during slow upstream responses.
 - Custom API keys can be replaced from the app using a secure field; leave it blank to keep the saved key.
 - The app bundles its matching CLI, so app and command behavior stay in sync after updates.
@@ -138,7 +139,7 @@ Set custom defaults:
 ```bash
 codex-switch config set \
   --local-base-url https://jp.icodeeasy.cc \
-  --local-model gpt-5.5 \
+  --local-upstream-model gpt-5.5 \
   --local-model-display-name "My Model" \
   --official-model gpt-5.2-codex
 ```
@@ -148,14 +149,14 @@ Configure Codex official and custom providers in parallel:
 ```bash
 codex-switch configure \
   --base-url https://jp.icodeeasy.cc \
-  --custom-model my-gpt-5.5 \
+  --custom-model gpt-5.5 \
   --custom-model-name "My Model" \
   --official-model gpt-5.5 \
   --default-provider custom \
   --chat-adapter
 ```
 
-`--custom-model` must be a unique model ID that is different from the official Codex model IDs. Codex de-duplicates models by ID, so using `gpt-5.5` for both the official and custom route will hide the custom display name. `--chat-adapter` starts a local launchd service on `127.0.0.1:17638` and stores your real upstream URL separately, so Codex can speak Responses while your upstream API receives Chat Completions.
+`--custom-model` is the real upstream model ID sent to your custom API. It may be the same as an official model name such as `gpt-5.5`; Codex Switch will expose it to Codex as a safe internal slug such as `codex-switch/gpt-5.5`, so the official catalog entry is not overwritten. `--chat-adapter` starts a local launchd service on `127.0.0.1:17638` and stores your real upstream URL separately, so Codex can speak Responses while your upstream API receives Chat Completions.
 
 Temporarily override the custom API endpoint:
 
