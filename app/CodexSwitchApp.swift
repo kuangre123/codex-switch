@@ -355,6 +355,7 @@ struct ContentView: View {
                 outputCard
             }
             Spacer(minLength: 0)
+            footer
         }
         .padding(24)
         .frame(minWidth: 660, minHeight: targetMode == .custom ? 520 : 460)
@@ -398,7 +399,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex Switch")
                     .font(.largeTitle.bold())
-                Text(texts.text("并行配置 Codex 的官方和自定义 API，也支持 Claude Code 路由。", "Configure Codex official and custom APIs side by side, with Claude Code route support."))
+                Text(texts.text("并行配置 Codex 的官方和自定义 API。", "Configure Codex official and custom APIs side by side."))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -409,6 +410,21 @@ struct ContentView: View {
             .pickerStyle(.menu)
             .frame(width: 130)
         }
+    }
+
+    private var appVersion: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
+    }
+
+    private var footer: some View {
+        HStack(spacing: 6) {
+            Spacer()
+            Text(verbatim: "v\(appVersion)")
+            Text(verbatim: "·")
+            Text(texts.text("作者：狂热AI（X：CrazyAIAgent）", "By 狂热AI (X: CrazyAIAgent)"))
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private var statusCard: some View {
@@ -430,12 +446,6 @@ struct ContentView: View {
     private var settingsCard: some View {
         GroupBox(texts.text("配置设置", "Setup")) {
             VStack(alignment: .leading, spacing: 14) {
-                Picker(texts.text("目标工具", "Target Tool"), selection: $targetTool) {
-                    Text("Codex").tag(SwitchTarget.codex)
-                    Text("Claude Code").tag(SwitchTarget.claude)
-                }
-                .pickerStyle(.segmented)
-
                 settingRow(texts.text("选择 API 提供方", "API Provider")) {
                     HStack(spacing: 12) {
                         Button {

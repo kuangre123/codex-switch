@@ -8,8 +8,28 @@ BUILD_DIR="$(mktemp -d)"
 BUILD_APP="$BUILD_DIR/Codex Switch.app"
 XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-}"
 
-if [[ -z "$XCODE_DEVELOPER_DIR" && -d "$HOME/Downloads/Xcode-beta.app/Contents/Developer" ]]; then
-  XCODE_DEVELOPER_DIR="$HOME/Downloads/Xcode-beta.app/Contents/Developer"
+# A full Xcode (not just Command Line Tools) is required to build SwiftUI code,
+# because CLT lacks the SwiftUI macro plugins. Search common install locations.
+if [[ -z "$XCODE_DEVELOPER_DIR" ]]; then
+  for candidate in \
+    "$HOME/Desktop/Xcode-beta.app" \
+    "$HOME/Downloads/Xcode-beta.app" \
+    "/Applications/Xcode.app" \
+    "/Applications/Xcode-beta.app" \
+    "$HOME/Applications/Xcode.app"; do
+    if [[ -d "$candidate/Contents/Developer" ]]; then
+      XCODE_DEVELOPER_DIR="$candidate/Contents/Developer"
+      break
+    fi
+  done
+fi
+
+# Fall back to the active developer dir if it is a full Xcode.
+if [[ -z "$XCODE_DEVELOPER_DIR" ]]; then
+  active="$(xcode-select -p 2>/dev/null || true)"
+  if [[ "$active" == *"/Xcode"*".app/"* ]]; then
+    XCODE_DEVELOPER_DIR="$active"
+  fi
 fi
 
 if [[ -n "$XCODE_DEVELOPER_DIR" ]]; then
