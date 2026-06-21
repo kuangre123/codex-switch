@@ -1467,7 +1467,11 @@ def configure_codex(args: argparse.Namespace) -> int:
     print("model_catalog_json: (built-in)")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
+    selected_provider = "openai" if default_provider == "openai" else CUSTOM_PROVIDER_ID
     selected_model = official_model if default_provider == "openai" else custom_model
+    changed_rollouts, sqlite_rows, sync_backup = sync_provider_metadata(home, selected_provider, selected_model)
+    if changed_rollouts or sqlite_rows:
+        print(f"Synced {changed_rollouts} rollout(s) and {sqlite_rows} thread(s) to {selected_provider}/{selected_model}.")
     restart_codex(args, home, default_provider, selected_model)
     return 0
 
