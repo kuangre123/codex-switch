@@ -183,12 +183,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('requires_openai_auth = false', config)
             self.assertIn('wire_api = "responses"', config)
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
-            self.assertIn('model_catalog_json = "', config)
             self.assertIn('models = ["gpt-5.5"]', config)
             self.assertIn('[projects."/Users/sirchen/Documents/aimashi"]', config)
-            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            self.assertEqual(catalog["models"][0]["slug"], "gpt-5.5")
-            self.assertEqual(catalog["models"][0]["display_name"], "gpt-5.5")
+            # No custom model catalog is written (cc-switch style): rely on
+            # Codex's built-in catalog so the model list and conversations stay intact.
+            self.assertNotIn('model_catalog_json', config)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
             self.assertTrue((home / "backups").is_dir())
             self.assertTrue(any(p.name.startswith("config.toml.") for p in (home / "backups").iterdir()))
             self.assertEqual(stat.S_IMODE((home / "auth.json").stat().st_mode), 0o600)
@@ -273,7 +273,7 @@ class CodexSwitchTests(unittest.TestCase):
                 (home / "config.toml").read_text(encoding="utf-8"),
             )
 
-    def test_register_model_writes_codex_model_catalog(self) -> None:
+    def test_register_model_saves_setting_without_writing_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             home.mkdir()
@@ -281,9 +281,8 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "register-model", "my-custom-model", "--name", "我的模型")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            self.assertEqual(catalog["models"][0]["slug"], "my-custom-model")
-            self.assertEqual(catalog["models"][0]["display_name"], "我的模型")
+            # No custom catalog is written; only the saved setting changes.
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
             self.assertEqual(read_state(home)["local_model"], "my-custom-model")
             self.assertEqual(read_state(home)["local_model_display_name"], "我的模型")
 
@@ -384,25 +383,13 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model_provider = "custom"', config)
             self.assertIn('model = "vendor/custom-model"', config)
             self.assertIn('models = ["vendor/custom-model"]', config)
-            self.assertIn('model_catalog_json = "', config)
             self.assertEqual(read_state(home)["default_provider"], "custom")
             self.assertEqual(read_state(home)["local_upstream_model"], "vendor/custom-model")
-            # Custom mode writes a catalog that is a SUPERSET: official models are
-            # kept (so saved conversations still resolve) and the custom model is
-            # appended with its display name. model_catalog_json replaces Codex's
-            # built-in catalog, so dropping official models would break history.
-            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            slugs = [item["slug"] for item in catalog["models"]]
-            self.assertIn("gpt-official", slugs)
-            self.assertIn("vendor/custom-model", slugs)
-            custom_entry = next(m for m in catalog["models"] if m["slug"] == "vendor/custom-model")
-            self.assertEqual(custom_entry["display_name"], "我的模型")
-            # When default_provider is custom, custom model is visible and
-            # official models are hidden from the picker.
-            self.assertNotEqual(custom_entry.get("visibility"), "hide")
-            official_entry = next(m for m in catalog["models"] if m["slug"] == "gpt-official")
-            self.assertEqual(official_entry["display_name"], "GPT Official")
-            self.assertEqual(official_entry["visibility"], "hide")
+            # No custom catalog is written in any mode (cc-switch style): the
+            # active model is set in config.toml and Codex uses its built-in
+            # catalog, so saved conversations always resolve and never disappear.
+            self.assertNotIn('model_catalog_json', config)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
 
     def test_custom_catalog_preserves_models_used_by_existing_threads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -558,14 +545,15 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn('model = "codex-switch/gpt-5.5"', config)
             self.assertIn('models = ["codex-switch/gpt-5.5"]', config)
             state = read_state(home)
+            # When the upstream model id collides with an official one, the custom
+            # slug is namespaced so config/CLI routing stays unambiguous, while the
+            # adapter still sends the real upstream id ("gpt-5.5").
             self.assertEqual(state["local_model"], "codex-switch/gpt-5.5")
             self.assertEqual(state["local_upstream_model"], "gpt-5.5")
             self.assertEqual(state["adapter_upstream_model"], "gpt-5.5")
-            catalog = json.loads((home / "codex-switch-model-catalog.json").read_text(encoding="utf-8"))
-            official = next(m for m in catalog["models"] if m["slug"] == "gpt-5.5")
-            custom = next(m for m in catalog["models"] if m["slug"] == "codex-switch/gpt-5.5")
-            self.assertEqual(official["display_name"], "GPT-5.5")
-            self.assertEqual(custom["display_name"], "我的模型")
+            # No custom catalog is written.
+            self.assertNotIn('model_catalog_json', config)
+            self.assertFalse((home / "codex-switch-model-catalog.json").exists())
 
     def test_local_switch_rejects_empty_api_key_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -614,7 +602,10 @@ class CodexSwitchTests(unittest.TestCase):
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
 
-    def test_local_switch_provider_syncs_existing_thread_to_custom_provider(self) -> None:
+    def test_local_switch_preserves_existing_conversation_metadata(self) -> None:
+        # Core requirement: switching providers must NOT rewrite saved
+        # conversations. The desktop does not filter the list by model_provider,
+        # so re-tagging is both unnecessary and destructive.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -628,31 +619,21 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "local", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider/model-synced existing thread context to custom/gpt-5.5.", result.stdout)
+            # Saved conversation keeps its own provider/model untouched.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(meta["payload"]["model_provider"], "custom")
+            self.assertEqual(meta["payload"]["model_provider"], "openai")
             self.assertEqual(meta["payload"]["model"], "gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
                 models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-                cwd, has_user_event = connection.execute(
-                    "SELECT cwd, has_user_event FROM threads WHERE id = 'latest-official'"
-                ).fetchone()
-            self.assertEqual(providers, {"custom"})
-            self.assertEqual(models, {"gpt-5.5"})
-            self.assertEqual(cwd, "/tmp/example")
-            self.assertEqual(has_user_event, 1)
+            self.assertEqual(providers, {"openai", "custom"})
+            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
 
-    def test_local_switch_provider_syncs_all_threads_when_latest_is_custom(self) -> None:
+    def test_local_switch_does_not_retag_threads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
             write_thread_database(home)
-            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
-                connection.execute(
-                    "UPDATE threads SET updated_at_ms = 50000 WHERE id = 'current-custom'"
-                )
-                connection.commit()
             (home / "auth.json").write_text(
                 json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
                 encoding="utf-8",
@@ -661,9 +642,11 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "local", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider/model-synced existing thread context to custom/gpt-5.5.", result.stdout)
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+            self.assertEqual(providers, {"openai", "custom"})
 
-    def test_official_switch_provider_syncs_existing_thread_to_openai(self) -> None:
+    def test_official_switch_preserves_existing_conversation_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_local_config(home)
@@ -677,15 +660,15 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "official", "--migrate-latest", "--no-open")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Provider/model-synced existing thread context to openai/gpt-5.5.", result.stdout)
+            # The custom conversation keeps its provider/model after switching to official.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(meta["payload"]["model_provider"], "openai")
-            self.assertEqual(meta["payload"]["model"], "gpt-5.5")
+            self.assertEqual(meta["payload"]["model_provider"], "custom")
+            self.assertEqual(meta["payload"]["model"], "codex-switch/gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
                 models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            self.assertEqual(providers, {"openai"})
-            self.assertEqual(models, {"gpt-5.5"})
+            self.assertEqual(providers, {"openai", "custom"})
+            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
 
     def test_local_switch_uses_public_default_api_address(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -925,9 +908,9 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Restarted Codex.app", result.stdout)
 
-    def test_restart_retags_all_conversations_to_active_provider(self) -> None:
-        # The desktop app filters the conversation list by model_provider, so a
-        # provider switch must re-tag every saved conversation or they vanish.
+    def test_restart_does_not_retag_conversations(self) -> None:
+        # Verified empirically: the desktop does NOT filter the conversation list
+        # by model_provider, so restart must leave saved conversations untouched.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_local_config(home)  # model_provider = "custom"
@@ -940,11 +923,11 @@ class CodexSwitchTests(unittest.TestCase):
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
                 models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            # Every thread, including the previously openai-tagged ones, is now custom/gpt-5.5.
-            self.assertEqual(providers, {"custom"})
-            self.assertEqual(models, {"gpt-5.5"})
+            # Threads keep their original provider/model.
+            self.assertEqual(providers, {"openai", "custom"})
+            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
 
-    def test_restart_repairs_thread_metadata_when_codex_reverts_provider(self) -> None:
+    def test_restart_does_not_touch_conversations_on_provider_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -956,14 +939,13 @@ class CodexSwitchTests(unittest.TestCase):
                 with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider/model openai/gpt-5, not custom/gpt-5.5"):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
+            # Even on mismatch, conversations are never rewritten.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(meta["payload"]["model_provider"], "openai")
-            self.assertEqual(meta["payload"]["model"], "gpt-5")
+            self.assertEqual(meta["payload"]["model_provider"], "custom")
+            self.assertEqual(meta["payload"]["model"], "codex-switch/gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
-                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            self.assertEqual(providers, {"openai"})
-            self.assertEqual(models, {"gpt-5"})
+            self.assertEqual(providers, {"openai", "custom"})
 
 
 if __name__ == "__main__":

@@ -293,7 +293,7 @@ def ensure_profile(
     return updated
 
 
-def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path) -> str:
+def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path | None) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
     for section, lines in sections:
@@ -301,7 +301,10 @@ def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: s
             lines = set_key(lines, "model_provider", CUSTOM_PROVIDER_ID)
             lines = set_key(lines, "model", model)
             lines = set_key(lines, "preferred_auth_method", "chatgpt")
-            lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            if catalog_path is not None:
+                lines = set_key(lines, "model_catalog_json", str(catalog_path))
+            else:
+                lines = remove_key(lines, "model_catalog_json")
         rewritten.append((section, lines))
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [model])
     return "".join(line for _, lines in rewritten for line in lines)
@@ -735,13 +738,12 @@ def sync_provider_metadata(home: Path, provider: str, model: str) -> tuple[int, 
 
 
 def print_migration(home: Path, provider: str, model: str, args: argparse.Namespace) -> None:
-    if not getattr(args, "migrate_latest", False):
-        return
-    changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, provider, model)
-    print(f"Provider/model-synced existing thread context to {provider}/{model}.")
-    print(f"changed_session_files: {changed_rollouts}")
-    print(f"sqlite_rows_updated: {sqlite_rows}")
-    print(f"provider_sync_backup: {backup_dir}")
+    # Deliberately a no-op. Re-stamping every saved conversation's provider/model
+    # destroyed conversation metadata and was based on a false premise (the
+    # desktop app does not filter the conversation list by provider). Switching
+    # must never rewrite existing conversations. Kept for CLI compatibility
+    # (`--migrate-latest` is accepted but no longer mutates saved conversations).
+    return
 
 
 def strip_trailing_slash(value: str) -> str:
@@ -1268,36 +1270,23 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, 
         stderr=subprocess.DEVNULL,
     )
     time.sleep(1.5)
-    # Codex is now down, so the thread databases are unlocked. The desktop app
-    # filters the conversation list by model_provider, so re-tag every saved
-    # conversation to the active provider/model; otherwise switching providers
-    # can restore a thread with a model that belongs to the other provider.
-    try:
-        changed_rollouts, sqlite_rows, _ = sync_provider_metadata(home, expected_provider, expected_model)
-        if changed_rollouts or sqlite_rows:
-            print(
-                f"Synced existing conversations to provider/model {expected_provider}/{expected_model} "
-                f"({changed_rollouts} session files, {sqlite_rows} database rows)."
-            )
-    except SwitchError as exc:
-        print(f"Warning: could not sync conversation provider metadata: {exc}")
+    # NOTE: We intentionally do NOT rewrite existing conversations' provider or
+    # model here. The desktop app does not filter the conversation list by
+    # model_provider (verified: custom-tagged threads stay visible and openable
+    # while the active provider is openai), so the previous blanket re-tagging
+    # was both unnecessary and destructive -- it overwrote every conversation's
+    # real model, which is the opposite of this app's whole purpose (keep your
+    # conversations intact across switches). Switching only changes the active
+    # provider/model in config.toml; saved conversations keep their own metadata.
     subprocess.run(["open", "-a", "Codex"], check=True)
     time.sleep(RESTART_SETTLE_SECONDS)
     config = read_config(home / "config.toml")
     actual_provider = configured_provider(config)
     actual_model = configured_model(config)
     if actual_provider != expected_provider or actual_model != expected_model:
-        repair_summary = ""
-        if getattr(args, "migrate_latest", False):
-            changed_rollouts, sqlite_rows, backup_dir = sync_provider_metadata(home, actual_provider, actual_model)
-            repair_summary = (
-                f" Restored thread metadata to {actual_provider}/{actual_model} "
-                f"({changed_rollouts} session files, {sqlite_rows} database rows; backup: {backup_dir})."
-            )
         raise SwitchError(
             f"Codex restarted with provider/model {actual_provider}/{actual_model}, "
             f"not {expected_provider}/{expected_model}."
-            f"{repair_summary}"
         )
     print("Restarted Codex.app to reload the selected provider.")
 
@@ -1334,18 +1323,18 @@ def switch_local(args: argparse.Namespace) -> int:
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    # The catalog must be a superset of every model history references, so keep
-    # official + historical models alongside the custom one (model_catalog_json
-    # replaces Codex's built-in catalog).
-    write_model_catalog(catalog_path, model)
-    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, catalog_path)
+    # Never write a custom model_catalog_json (see configure_codex). Switching
+    # only changes config.toml; conversations are never touched.
+    if catalog_path.exists():
+        catalog_path.unlink()
+    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, None)
     atomic_write(config_path, config, 0o600)
 
     print("Switched Codex to local relay API mode.")
     print(f"codex_home: {home}")
     print(f"base_url: {base_url}")
     print(f"model: {model}")
-    print(f"model_catalog_json: {catalog_path}")
+    print("model_catalog_json: (built-in)")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
@@ -1446,21 +1435,13 @@ def configure_codex(args: argparse.Namespace) -> int:
     else:
         auth["auth_mode"] = "chatgpt"
     write_auth(auth_path, auth)
-    # The Codex picker has a single active provider, so the model catalog must
-    # only expose models that route to it. In official mode we fall back to
-    # A custom model_catalog_json REPLACES Codex's built-in catalog, so writing
-    # one in official mode would shrink the official model list to only the few
-    # entries we know about (losing gpt-5.5, gpt-5.3-codex, etc.). Therefore:
-    #   - official mode: remove our catalog and let Codex use its built-in list.
-    #   - custom mode: write a catalog exposing only the custom model so the
-    #     picker routes correctly through the custom provider/adapter.
-    if default_provider == CUSTOM_PROVIDER_ID:
-        write_model_catalog(catalog_path, custom_model, display_name, visible_provider=default_provider)
-        effective_catalog: Path | None = catalog_path
-    else:
-        if catalog_path.exists():
-            catalog_path.unlink()
-        effective_catalog = None
+    # cc-switch lesson: never write a custom model_catalog_json. It REPLACES
+    # Codex's built-in catalog (shrinking the official model list and breaking
+    # model resolution), and a single malformed catalog makes Codex fail to load
+    # config -> the conversation list disappears. Switching must only change the
+    # active provider/model in config.toml; conversations are never touched.
+    if catalog_path.exists():
+        catalog_path.unlink()
     adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
     config = rewrite_config_for_parallel(
         read_config(config_path),
@@ -1468,7 +1449,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         official_model,
         custom_model,
         api_key,
-        effective_catalog,
+        None,
         default_provider,
         skip_login,
     )
@@ -1485,7 +1466,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     print(f"custom_model: {custom_model}")
     print(f"upstream_model: {requested_model}")
     print(f"custom_model_name: {display_name}")
-    print(f"model_catalog_json: {effective_catalog if effective_catalog is not None else '(built-in)'}")
+    print("model_catalog_json: (built-in)")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     selected_model = official_model if default_provider == "openai" else custom_model
@@ -1563,18 +1544,14 @@ def codex_register_model(args: argparse.Namespace) -> int:
     display_name = args.name.strip() if args.name else model
     if not display_name:
         raise SwitchError("model display name cannot be empty")
-    catalog_path = model_catalog_path(home)
-    backup_file(catalog_path, home / "backups")
     state["local_model"] = model
     state["local_model_display_name"] = display_name
     save_state(home, state)
-    write_model_catalog(catalog_path, model, display_name)
-    print("Registered custom Codex model catalog.")
+    print("Saved custom Codex model setting.")
     print(f"codex_home: {home}")
     print(f"model: {model}")
     print(f"custom_model_name: {display_name}")
-    print(f"model_catalog_json: {catalog_path}")
-    print("Switch to custom API mode to write this path into config.toml.")
+    print("Switch to custom API mode to apply it in config.toml.")
     return 0
 
 
