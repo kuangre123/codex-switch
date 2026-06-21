@@ -1418,12 +1418,11 @@ def configure_codex(args: argparse.Namespace) -> int:
     state["default_provider"] = default_provider
     if getattr(args, "chat_adapter", False):
         state["chat_adapter"] = "true"
-        state["adapter_upstream_base_url"] = base_url
-        state["adapter_upstream_model"] = requested_model
-        provider_base_url = DEFAULT_ADAPTER_BASE_URL
     else:
         state["chat_adapter"] = "false"
-        provider_base_url = base_url
+    state["adapter_upstream_base_url"] = base_url
+    state["adapter_upstream_model"] = requested_model
+    provider_base_url = DEFAULT_ADAPTER_BASE_URL
     skip_login = getattr(args, "skip_login", False)
     state["skip_login"] = "true" if skip_login else "false"
     save_state(home, state)
@@ -1442,7 +1441,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     # active provider/model in config.toml; conversations are never touched.
     if catalog_path.exists():
         catalog_path.unlink()
-    adapter_plist = start_adapter_launch_agent(home) if getattr(args, "chat_adapter", False) else None
+    adapter_plist = start_adapter_launch_agent(home)
     config = rewrite_config_for_parallel(
         read_config(config_path),
         provider_base_url,
@@ -1460,9 +1459,8 @@ def configure_codex(args: argparse.Namespace) -> int:
     print(f"model_provider: {default_provider}")
     print(f"official_model: {official_model}")
     print(f"custom.base_url: {provider_base_url}")
-    if adapter_plist is not None:
-        print(f"adapter_upstream_base_url: {base_url}")
-        print(f"adapter_launch_agent: {adapter_plist}")
+    print(f"adapter_upstream_base_url: {base_url}")
+    print(f"adapter_launch_agent: {adapter_plist}")
     print(f"custom_model: {custom_model}")
     print(f"upstream_model: {requested_model}")
     print(f"custom_model_name: {display_name}")
@@ -1628,7 +1626,16 @@ def switch_claude_local(args: argparse.Namespace) -> int:
     state["local_api_key"] = api_key
     save_claude_state(home, state)
 
-    env["ANTHROPIC_BASE_URL"] = base_url
+    ch = codex_home()
+    codex_st = load_state(ch)
+    codex_st["adapter_upstream_base_url"] = base_url
+    codex_st["adapter_upstream_model"] = model
+    codex_st["local_api_key"] = api_key
+    save_state(ch, codex_st)
+    adapter_plist = start_adapter_launch_agent(ch)
+
+    adapter_url = f"http://{DEFAULT_ADAPTER_HOST}:{DEFAULT_ADAPTER_PORT}"
+    env["ANTHROPIC_BASE_URL"] = adapter_url
     env["ANTHROPIC_AUTH_TOKEN"] = api_key
     env["ANTHROPIC_MODEL"] = model
     env.pop("ANTHROPIC_API_KEY", None)
@@ -1636,7 +1643,9 @@ def switch_claude_local(args: argparse.Namespace) -> int:
 
     print("Switched Claude Code to custom API mode.")
     print(f"claude_home: {home}")
-    print(f"base_url: {base_url}")
+    print(f"upstream_url: {base_url} (via adapter)")
+    print(f"adapter: {adapter_url}")
+    print(f"adapter_launch_agent: {adapter_plist}")
     print(f"model: {model}")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
