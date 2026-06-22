@@ -256,6 +256,12 @@ def ensure_custom_provider(sections: list[tuple[str, list[str]]], base_url: str,
             lines = set_key(lines, "wire_api", "responses")
             lines = set_key(lines, "experimental_bearer_token", api_key)
             lines = set_raw_key(lines, "models", quoted_array(models))
+            # Strip stale env-var auth keys from older configs. When env_key is
+            # present Codex demands that environment variable and ignores
+            # experimental_bearer_token, which breaks the desktop app (GUI apps
+            # don't inherit the shell's CODEX_CUSTOM_API_KEY).
+            lines = remove_key(lines, "env_key")
+            lines = remove_key(lines, "env_key_instructions")
         updated.append((section, lines))
     if not found:
         lines = [
