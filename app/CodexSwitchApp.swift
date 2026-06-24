@@ -512,10 +512,17 @@ struct ContentView: View {
                                             model.useChatAdapter = true
                                         }
                                     }
+                                    Divider()
+                                    Button(texts.text("第三方 / 中转 API（手动填写）", "Third-party / Relay API (manual)")) {
+                                        model.localBaseURL = ""
+                                        model.localModel = ""
+                                        model.localModelDisplayName = ""
+                                        model.useChatAdapter = true
+                                    }
                                 } label: {
-                                    Label(texts.text("选择常用国内模型…", "Pick a preset provider…"), systemImage: "wand.and.stars")
+                                    Label(texts.text("选择常用国内模型 / 第三方…", "Pick a preset or third-party…"), systemImage: "wand.and.stars")
                                 }
-                                .help(texts.text("一键填入接入点与模型，之后只需粘贴 API Key", "Fills the endpoint and model; just paste your API key"))
+                                .help(texts.text("一键填入接入点与模型，之后只需粘贴 API Key；第三方/中转站选「手动填写」并填入其接入点即可", "Fills the endpoint and model; for any third-party/relay choose Manual and enter its endpoint"))
                             }
                         }
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
