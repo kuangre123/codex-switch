@@ -31,6 +31,27 @@ struct Texts {
     }
 }
 
+// Built-in presets for common domestic OpenAI-compatible providers. They all
+// speak Chat Completions (not Responses), so each enables the Chat adapter.
+// base_url and a sensible default model are filled in; the user only pastes
+// their API key (and can tweak the model id).
+struct ProviderPreset: Identifiable {
+    let id: String
+    let name: String
+    let baseURL: String
+    let model: String
+    let displayName: String
+
+    static let all: [ProviderPreset] = [
+        ProviderPreset(id: "deepseek", name: "DeepSeek 深度求索", baseURL: "https://api.deepseek.com/v1", model: "deepseek-chat", displayName: "DeepSeek"),
+        ProviderPreset(id: "kimi", name: "Kimi 月之暗面", baseURL: "https://api.moonshot.cn/v1", model: "kimi-k2-0905-preview", displayName: "Kimi"),
+        ProviderPreset(id: "zhipu", name: "智谱 GLM", baseURL: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.6", displayName: "智谱 GLM"),
+        ProviderPreset(id: "qwen", name: "通义千问 Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen3-coder-plus", displayName: "通义千问"),
+        ProviderPreset(id: "minimax", name: "MiniMax", baseURL: "https://api.minimaxi.com/v1", model: "MiniMax-M2", displayName: "MiniMax"),
+        ProviderPreset(id: "stepfun", name: "阶跃星辰 StepFun", baseURL: "https://api.stepfun.com/v1", model: "step-2-16k", displayName: "StepFun"),
+    ]
+}
+
 struct CommandResult {
     let status: Int32
     let output: String
@@ -478,6 +499,23 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     if targetTool == .codex || targetMode == .custom {
+                        if targetTool == .codex && targetMode == .custom {
+                            settingRow(texts.text("快速预设", "Quick Preset")) {
+                                Menu {
+                                    ForEach(ProviderPreset.all) { preset in
+                                        Button(preset.name) {
+                                            model.localBaseURL = preset.baseURL
+                                            model.localModel = preset.model
+                                            model.localModelDisplayName = preset.displayName
+                                            model.useChatAdapter = true
+                                        }
+                                    }
+                                } label: {
+                                    Label(texts.text("选择常用国内模型…", "Pick a preset provider…"), systemImage: "wand.and.stars")
+                                }
+                                .help(texts.text("一键填入接入点与模型，之后只需粘贴 API Key", "Fills the endpoint and model; just paste your API key"))
+                            }
+                        }
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
                         }
