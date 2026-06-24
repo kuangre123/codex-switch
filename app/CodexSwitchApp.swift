@@ -531,8 +531,8 @@ struct ContentView: View {
                                     Divider()
                                     Button(texts.text("第三方 / 中转 API（手动填写）", "Third-party / Relay API (manual)")) {
                                         model.localBaseURL = ""
-                                        model.localModel = ""
-                                        model.localModelDisplayName = ""
+                                        model.localModel = "gpt-5.5"
+                                        model.localModelDisplayName = "gpt-5.5"
                                         model.useChatAdapter = true
                                     }
                                 } label: {
