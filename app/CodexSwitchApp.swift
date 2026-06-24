@@ -272,6 +272,12 @@ final class SwitchViewModel: ObservableObject {
         if skipLogin {
             arguments.append("--skip-login")
         }
+        if mode == .custom {
+            // Smart routing: verify the custom API responds before saving, so a
+            // wrong endpoint/model/key fails fast with a clear message instead of
+            // a broken Codex session.
+            arguments.append("--probe")
+        }
         var switchInput: String?
         if !replacementKey.isEmpty {
             arguments.append("--api-key-stdin")

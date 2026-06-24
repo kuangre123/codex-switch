@@ -770,6 +770,51 @@ def responses_url(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
+def _probe_endpoint(url: str, payload: dict[str, object], api_key: str, timeout: float) -> tuple[bool, str]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(4096)
+        return True, "ok"
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read(400).decode("utf-8", errors="replace")
+        except OSError:
+            pass
+        return False, f"HTTP {exc.code} {body}".strip()
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return False, str(exc)
+
+
+def probe_custom_upstream(base_url: str, model: str, api_key: str, timeout: float = 20.0) -> tuple[bool, str, str]:
+    """Probe the custom API at save time. Try the Codex-native Responses API
+    first, then Chat Completions. Returns (ok, protocol, detail)."""
+    ok, info = _probe_endpoint(
+        responses_url(base_url),
+        {"model": model, "input": "hi", "max_output_tokens": 16, "stream": False},
+        api_key,
+        timeout,
+    )
+    if ok:
+        return True, "responses", "ok"
+    responses_detail = info
+    ok, info = _probe_endpoint(
+        chat_completions_url(base_url),
+        {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16, "stream": False},
+        api_key,
+        timeout,
+    )
+    if ok:
+        return True, "chat", "ok"
+    return False, "", f"/responses → {responses_detail}\n/chat/completions → {info}"
+
+
 def response_content_to_text(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -1223,7 +1268,19 @@ def launchctl_gui_target() -> str:
 def write_adapter_launch_agent(home: Path, host: str = DEFAULT_ADAPTER_HOST, port: int = DEFAULT_ADAPTER_PORT) -> Path:
     path = adapter_launch_agent_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    cli_path = str(Path(sys.argv[0]).resolve())
+    # Copy the running script to a stable location under codex_home and point the
+    # LaunchAgent there. The app bundle can be run via macOS App Translocation
+    # from a temporary, read-only path that disappears when the app quits/updates;
+    # baking that path into the LaunchAgent kills the adapter mid-stream
+    # ("stream closed before response.completed"). A stable copy survives all that.
+    source = Path(sys.argv[0]).resolve()
+    stable_script = home / "codex-switch-adapter.py"
+    try:
+        shutil.copy2(source, stable_script)
+        stable_script.chmod(0o755)
+        cli_path = str(stable_script)
+    except OSError:
+        cli_path = str(source)
     log_path = str(home / "codex-switch-adapter.log")
     content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1411,6 +1468,19 @@ def configure_codex(args: argparse.Namespace) -> int:
         api_key = cached_key.strip()
     if not api_key:
         raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
+
+    # Smart routing: at save time, probe the custom upstream so the user gets
+    # immediate feedback instead of a broken Codex session. Tries the native
+    # Responses API first, then Chat Completions; if neither works, abort with a
+    # clear "check your settings" error before writing anything.
+    if getattr(args, "probe", False) and default_provider == CUSTOM_PROVIDER_ID:
+        ok, protocol, detail = probe_custom_upstream(base_url, requested_model, api_key)
+        if not ok:
+            raise SwitchError(
+                "自定义 API 验证失败，请检查接入点、模型 ID 和 API Key（也可能是上游服务临时不可用，可稍后重试）。\n"
+                f"{detail}"
+            )
+        print(f"probe_ok: {protocol}")
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
@@ -1807,6 +1877,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving. Defaults to saved setting or openai.")
     configure.add_argument("--chat-adapter", action="store_true", help="Route Codex Responses API traffic through the local chat-completions adapter.")
+    configure.add_argument("--probe", action="store_true", help="Before saving, verify the custom API responds (Responses or Chat Completions); abort with an error if neither works.")
     configure.add_argument("--skip-login", action="store_true", help="Bypass ChatGPT OAuth login by using API-key auth mode.")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
     configure.set_defaults(func=configure_codex)
