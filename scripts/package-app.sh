@@ -51,17 +51,27 @@ cp "$ROOT_DIR/app/Info.plist" "$BUILD_APP/Contents/Info.plist"
 cp "$ROOT_DIR/assets/app-icon.icns" "$BUILD_APP/Contents/Resources/app-icon.icns"
 cp "$ROOT_DIR/src/codex_switch/cli.py" "$BUILD_APP/Contents/Resources/codex-switch"
 chmod 755 "$BUILD_APP/Contents/Resources/codex-switch"
-CLANG_MODULE_CACHE_PATH="$BUILD_DIR/clang-cache" \
-SWIFT_MODULECACHE_PATH="$BUILD_DIR/swift-cache" \
-"$SWIFTC" \
-  -parse-as-library \
-  -O \
-  -target "$(uname -m)-apple-macos13.0" \
-  -sdk "$SDK_PATH" \
-  -framework SwiftUI \
-  -framework AppKit \
-  "$ROOT_DIR/app/CodexSwitchApp.swift" \
-  -o "$BUILD_APP/Contents/MacOS/Codex Switch"
+# Build a universal binary (arm64 + x86_64) so the app runs on both Apple
+# Silicon and Intel Macs. Compiling only for the build host's arch produces a
+# single-arch app that fails to launch on the other architecture
+# ("this Mac does not support this application").
+ARCH_BINARIES=()
+for arch in arm64 x86_64; do
+  arch_out="$BUILD_DIR/Codex Switch-$arch"
+  CLANG_MODULE_CACHE_PATH="$BUILD_DIR/clang-cache-$arch" \
+  SWIFT_MODULECACHE_PATH="$BUILD_DIR/swift-cache-$arch" \
+  "$SWIFTC" \
+    -parse-as-library \
+    -O \
+    -target "$arch-apple-macos13.0" \
+    -sdk "$SDK_PATH" \
+    -framework SwiftUI \
+    -framework AppKit \
+    "$ROOT_DIR/app/CodexSwitchApp.swift" \
+    -o "$arch_out"
+  ARCH_BINARIES+=("$arch_out")
+done
+lipo -create "${ARCH_BINARIES[@]}" -output "$BUILD_APP/Contents/MacOS/Codex Switch"
 codesign --force --deep --sign - "$BUILD_APP" >/dev/null
 rm -rf "$APP_PATH"
 ditto "$BUILD_APP" "$APP_PATH"
