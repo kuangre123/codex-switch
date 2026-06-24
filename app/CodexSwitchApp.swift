@@ -500,6 +500,22 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
+                    if targetTool == .codex {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(texts.text("自定义 / 第三方供应商", "Custom / Third-party Provider"), systemImage: "shippingbox")
+                                .font(.headline)
+                            Text(texts.text(
+                                "支持任意 OpenAI 兼容的第三方 / 中转 API：填入它的接入点、模型 ID 和 API Key 即可。接入点不要以 / 结尾；多数中转为 Chat Completions，保持下方「Chat 适配器」开启。",
+                                "Works with any OpenAI-compatible third-party / relay API: enter its endpoint, model ID and API key. Don't end the endpoint with a slash; most relays are Chat Completions, so keep the adapter on."
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    }
                     if targetTool == .codex || targetMode == .custom {
                         if targetTool == .codex && targetMode == .custom {
                             settingRow(texts.text("快速预设", "Quick Preset")) {
