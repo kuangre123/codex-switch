@@ -72,7 +72,19 @@ for arch in arm64 x86_64; do
   ARCH_BINARIES+=("$arch_out")
 done
 lipo -create "${ARCH_BINARIES[@]}" -output "$BUILD_APP/Contents/MacOS/Codex Switch"
-codesign --force --deep --sign - "$BUILD_APP" >/dev/null
+
+# Sign with a Developer ID Application identity (+ hardened runtime + secure
+# timestamp) when available so the app can be notarized for direct download.
+# Fall back to ad-hoc signing for local dev builds.
+SIGN_ID="${CODEX_SWITCH_SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
+if [[ -n "$SIGN_ID" ]]; then
+  echo "Signing with: $SIGN_ID" >&2
+  codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$BUILD_APP/Contents/MacOS/Codex Switch"
+  codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$BUILD_APP"
+else
+  echo "No Developer ID identity found; ad-hoc signing (not notarizable)." >&2
+  codesign --force --deep --sign - "$BUILD_APP" >/dev/null
+fi
 rm -rf "$APP_PATH"
 ditto "$BUILD_APP" "$APP_PATH"
 echo "$APP_PATH"

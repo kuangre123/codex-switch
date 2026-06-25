@@ -29,4 +29,25 @@ hdiutil create \
   -ov \
   "$DMG_PATH" >/dev/null
 
+# Notarize + staple so the DMG opens without a Gatekeeper warning, using the
+# App Store Connect API key. Skipped automatically if creds are unavailable.
+ASC_CFG="$HOME/.config/appstore-connect/default.json"
+if [[ -f "$ASC_CFG" ]] && security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+  KEY_ID="$(python3 -c "import json;print(json.load(open('$ASC_CFG'))['key_id'])")"
+  ISSUER="$(python3 -c "import json;print(json.load(open('$ASC_CFG'))['issuer_id'])")"
+  KEYFILE=""
+  for c in "$HOME/AuthKey_${KEY_ID}.p8" "$(python3 -c "import json;print(json.load(open('$ASC_CFG')).get('key_filepath',''))")"; do
+    [[ -n "$c" && -f "$c" ]] && KEYFILE="$c" && break
+  done
+  if [[ -n "$KEYFILE" ]]; then
+    echo "Notarizing $DMG_PATH …" >&2
+    xcrun notarytool submit "$DMG_PATH" --key "$KEYFILE" --key-id "$KEY_ID" --issuer "$ISSUER" --wait >&2
+    xcrun stapler staple "$DMG_PATH" >&2
+  else
+    echo "Notary key (.p8) not found; skipping notarization." >&2
+  fi
+else
+  echo "No Developer ID identity / ASC config; skipping notarization." >&2
+fi
+
 echo "$DMG_PATH"
