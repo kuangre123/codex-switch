@@ -42,7 +42,7 @@ The app is **signed with a Developer ID and notarized by Apple**, and is a **uni
 
 ## 切换原理 / How switching works
 
-借鉴 [cc-switch](https://github.com/farion1231/cc-switch) 的思路：**provider 切换工具只应写实时配置文件，绝不动会话数据**。
+**provider 切换工具只应写实时配置文件，绝不动会话数据**。
 
 - 选「自定义 API」→ 顶层 `model_provider = "custom"`，Codex 走你的自定义 provider。
 - 选「官方 OpenAI」→ 顶层 `model_provider = "openai"`，Codex 走官方，用其内置模型目录（官方模型列表完整）。
