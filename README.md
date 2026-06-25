@@ -11,6 +11,10 @@ It turns hand‑editing `~/.codex/auth.json` and `config.toml` into one save: Of
 > ⚠️ 不要在对话里让 Codex 自己改接入方式，容易改坏。切换请用本工具，稳定得多。
 > Don't ask Codex itself to edit its provider config in chat — use this app to switch, it's far more reliable.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="Codex Switch" width="600">
+</p>
+
 ## 下载 / Download
 
 从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载，**推荐 DMG**：

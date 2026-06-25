@@ -6,6 +6,10 @@ Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 
 
 > ⚠️ 不要在对话里让 Codex 自己改接入方式，容易改坏。切换请用本工具，稳定得多。
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="Codex Switch" width="600">
+</p>
+
 ## 下载
 
 从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载，**推荐 DMG**：
