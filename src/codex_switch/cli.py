@@ -770,49 +770,61 @@ def responses_url(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
-def _probe_endpoint(url: str, payload: dict[str, object], api_key: str, timeout: float) -> tuple[bool, str]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
+# HTTP statuses that mean the endpoint/model/key is clearly wrong (worth
+# blocking the save). 429 / 5xx / connection errors are transient and must not.
+_PROBE_CONFIG_ERROR_CODES = {400, 401, 403, 404, 405, 422}
+
+
+def _probe_endpoint(url: str, payload: dict[str, object], api_key: str, timeout: float) -> tuple[int, str]:
+    """POST a tiny request. Returns (status_code, detail). status_code is the
+    HTTP code, or 0 when the endpoint could not be reached / any other error.
+    Never raises — a probe must never crash the save."""
     try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response.read(4096)
-        return True, "ok"
+        return 200, "ok"
     except urllib.error.HTTPError as exc:
         body = ""
         try:
             body = exc.read(400).decode("utf-8", errors="replace")
-        except OSError:
+        except Exception:
             pass
-        return False, f"HTTP {exc.code} {body}".strip()
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return False, str(exc)
+        return int(exc.code), f"HTTP {exc.code} {body}".strip()
+    except Exception as exc:  # URLError, OSError, http.client.*, ValueError, …
+        return 0, str(exc)
 
 
-def probe_custom_upstream(base_url: str, model: str, api_key: str, timeout: float = 20.0) -> tuple[bool, str, str]:
+def probe_custom_upstream(base_url: str, model: str, api_key: str, timeout: float = 20.0) -> tuple[str, str, str]:
     """Probe the custom API at save time. Try the Codex-native Responses API
-    first, then Chat Completions. Returns (ok, protocol, detail)."""
-    ok, info = _probe_endpoint(
+    first, then Chat Completions. Returns (status, protocol, detail) where
+    status is "ok" (reachable), "rejected" (endpoint/model/key clearly wrong on
+    both protocols), or "unverified" (transient / couldn't reach — don't block)."""
+    code1, detail1 = _probe_endpoint(
         responses_url(base_url),
         {"model": model, "input": "hi", "max_output_tokens": 16, "stream": False},
         api_key,
         timeout,
     )
-    if ok:
-        return True, "responses", "ok"
-    responses_detail = info
-    ok, info = _probe_endpoint(
+    if code1 == 200:
+        return "ok", "responses", "ok"
+    code2, detail2 = _probe_endpoint(
         chat_completions_url(base_url),
         {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16, "stream": False},
         api_key,
         timeout,
     )
-    if ok:
-        return True, "chat", "ok"
-    return False, "", f"/responses → {responses_detail}\n/chat/completions → {info}"
+    if code2 == 200:
+        return "ok", "chat", "ok"
+    detail = f"/responses → {detail1}\n/chat/completions → {detail2}"
+    if code1 in _PROBE_CONFIG_ERROR_CODES and code2 in _PROBE_CONFIG_ERROR_CODES:
+        return "rejected", "", detail
+    return "unverified", "", detail
 
 
 def response_content_to_text(content: object) -> str:
@@ -1470,17 +1482,22 @@ def configure_codex(args: argparse.Namespace) -> int:
         raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
 
     # Smart routing: at save time, probe the custom upstream so the user gets
-    # immediate feedback instead of a broken Codex session. Tries the native
-    # Responses API first, then Chat Completions; if neither works, abort with a
-    # clear "check your settings" error before writing anything.
+    # immediate feedback instead of a broken Codex session. Only a clear
+    # rejection (endpoint/model/key wrong on both protocols) blocks the save;
+    # transient errors (rate limit, 5xx, can't connect) just warn and proceed,
+    # and the probe never crashes the save.
     if getattr(args, "probe", False) and default_provider == CUSTOM_PROVIDER_ID:
-        ok, protocol, detail = probe_custom_upstream(base_url, requested_model, api_key)
-        if not ok:
+        status, protocol, detail = probe_custom_upstream(base_url, requested_model, api_key)
+        if status == "rejected":
             raise SwitchError(
-                "自定义 API 验证失败，请检查接入点、模型 ID 和 API Key（也可能是上游服务临时不可用，可稍后重试）。\n"
+                "自定义 API 验证失败，请检查接入点、模型 ID 和 API Key。\n"
                 f"{detail}"
             )
-        print(f"probe_ok: {protocol}")
+        if status == "unverified":
+            print("probe_warn: 暂时无法验证自定义 API（可能限流或临时不可用），已继续保存。")
+            print(detail)
+        else:
+            print(f"probe_ok: {protocol}")
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
