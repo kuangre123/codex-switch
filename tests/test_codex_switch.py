@@ -331,7 +331,10 @@ class CodexSwitchTests(unittest.TestCase):
             # Top-level (desktop default) is official.
             self.assertIn('model_provider = "openai"', config)
             self.assertIn('model = "gpt-official"', config)
-            self.assertIn('base_url = "https://custom.example/v1"', config)
+            # The custom provider always routes through the local adapter; the real
+            # upstream URL is stored separately in state.
+            self.assertIn('base_url = "http://127.0.0.1:17638/v1"', config)
+            self.assertEqual(read_state(home)["adapter_upstream_base_url"], "https://custom.example/v1")
             self.assertIn('models = ["vendor/custom-model"]', config)
             # Official default mode must use Codex's built-in catalog so the
             # full official model list is preserved.
@@ -817,8 +820,8 @@ class CodexSwitchTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_claude_tool(
-                home,
+            result = run_tool_with_env(
+                {"CLAUDE_CONFIG_DIR": str(home), "CODEX_HOME": str(home.parent / ".codex")},
                 "claude-local",
                 "--base-url",
                 "https://claude.example.com",
@@ -832,7 +835,12 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertNotIn("sk-claude-secret", result.stdout)
             settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
             self.assertFalse(settings["agentPushNotifEnabled"])
-            self.assertEqual(settings["env"]["ANTHROPIC_BASE_URL"], "https://claude.example.com")
+            # Claude Code is routed through the local adapter; the real upstream URL
+            # is stored separately, not written into ANTHROPIC_BASE_URL.
+            self.assertEqual(
+                settings["env"]["ANTHROPIC_BASE_URL"],
+                f"http://{cli_module.DEFAULT_ADAPTER_HOST}:{cli_module.DEFAULT_ADAPTER_PORT}",
+            )
             self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-claude-secret")
             self.assertEqual(settings["env"]["ANTHROPIC_MODEL"], "router/claude-sonnet")
             self.assertNotIn("ANTHROPIC_API_KEY", settings["env"])
