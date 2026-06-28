@@ -549,13 +549,16 @@ struct ContentView: View {
                         }
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
+                                .disableAutocorrection(true)
                         }
                         settingRow(texts.text(targetTool == .codex ? "上游模型 ID" : "自定义模型 ID", targetTool == .codex ? "Upstream Model ID" : "Custom Model ID")) {
                             TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
+                                .disableAutocorrection(true)
                         }
                         if targetTool == .codex {
                             settingRow(texts.text("显示名称", "Display Name")) {
                                 TextField(texts.text("我的模型", "My Model"), text: $model.localModelDisplayName)
+                                    .disableAutocorrection(true)
                             }
                             settingRow(texts.text("Chat 适配器", "Chat Adapter")) {
                                 Toggle(texts.text("把 Chat Completions 转成 Responses", "Bridge Chat Completions to Responses"), isOn: $model.useChatAdapter)
@@ -575,6 +578,7 @@ struct ContentView: View {
                         settingRow(texts.text("官方模型", "Official Model")) {
                             HStack(spacing: 8) {
                                 TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.officialModel)
+                                    .disableAutocorrection(true)
                                 Menu {
                                     ForEach(officialModelOptions, id: \.self) { option in
                                         Button(option) {
