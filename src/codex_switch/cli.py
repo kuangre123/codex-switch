@@ -39,6 +39,7 @@ CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
 CLAUDE_DEFAULT_OFFICIAL_MODEL = "claude-sonnet-4-6"
 RESTART_SETTLE_SECONDS = 3.0
+UPSTREAM_USER_AGENT = "CodexSwitch/1.0"
 CONFIG_KEYS = ("local_base_url", "local_model", "local_upstream_model", "official_model")
 CUSTOM_PROVIDER_ID = "custom"
 MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
@@ -783,7 +784,7 @@ def _probe_endpoint(url: str, payload: dict[str, object], api_key: str, timeout:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "User-Agent": UPSTREAM_USER_AGENT},
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -1086,6 +1087,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                "User-Agent": UPSTREAM_USER_AGENT,
             },
             method="POST",
         )
@@ -1115,6 +1117,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                "User-Agent": UPSTREAM_USER_AGENT,
             },
             method="POST",
         )
@@ -1152,6 +1155,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "text/event-stream",
+                "User-Agent": UPSTREAM_USER_AGENT,
             },
             method="POST",
         )
@@ -1374,6 +1378,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "text/event-stream",
+                "User-Agent": UPSTREAM_USER_AGENT,
             },
             method="POST",
         )
