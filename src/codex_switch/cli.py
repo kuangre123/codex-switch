@@ -1058,34 +1058,27 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         resp_id = f"resp_{uuid.uuid4().hex}"
 
         if stream:
-            # Prefer relaying the upstream's native /v1/responses SSE stream so
-            # reasoning/output streams in real time. The chat-completions bridge
-            # buffers the entire turn (stream=False upstream), which makes Codex
-            # sit on "thinking" and interrupt on long reasoning. Fall back to the
-            # bridge only if the upstream can't stream responses.
             if self.relay_responses_stream(request, upstream_base_url, upstream_model, api_key):
                 return
-            # Fallback: emit our own SSE while we convert chat-completions output.
+            if self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id):
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.write_sse("response.created", {
-                "type": "response.created",
+            self.write_sse("response.failed", {
+                "type": "response.failed",
                 "response": {
-                    "id": resp_id,
-                    "object": "response",
-                    "created_at": int(time.time()),
-                    "status": "in_progress",
-                    "model": upstream_model,
-                    "output": [],
+                    "id": resp_id, "object": "response",
+                    "created_at": int(time.time()), "status": "failed",
+                    "model": upstream_model, "output": [],
+                    "error": {"message": "upstream did not return a usable response"},
                 },
             })
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
 
-        # Always ask the upstream Chat Completions endpoint for a complete
-        # response. Many OpenAI-compatible relays stream text deltas but omit or
-        # vary tool-call deltas; Codex needs reliable tool calls more than token
-        # streaming when we bridge Chat Completions to Responses.
         payload = responses_request_to_chat_payload(request, upstream_model, False)
         upstream_request = urllib.request.Request(
             chat_completions_url(upstream_base_url),
@@ -1101,38 +1094,11 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 chat = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            if "/v1/responses" in error_body or "responses" in error_body.lower():
-                result = self.passthrough_responses(request, upstream_base_url, upstream_model, api_key, resp_id, stream)
-                if result is not None:
-                    if stream:
-                        self.write_response_stream(result)
-                    else:
-                        self.send_json(200, result)
-                    return
-            if stream:
-                self.write_sse("response.failed", {
-                    "type": "response.failed",
-                    "response": {
-                        "id": resp_id,
-                        "object": "response",
-                        "created_at": int(time.time()),
-                        "status": "failed",
-                        "model": upstream_model,
-                        "output": [],
-                        "error": {"message": error_body},
-                    },
-                })
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-                return
             self.send_json(exc.code, {"error": {"message": error_body}})
             return
 
         result = chat_response_to_responses(chat, upstream_model)
         result["id"] = resp_id
-        if stream:
-            self.write_response_stream(result)
-            return
         self.send_json(200, result)
 
     def passthrough_responses(
@@ -1168,6 +1134,225 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 "total_tokens": raw_usage.get("total_tokens") or 0,
             }
         return result
+
+    def relay_chat_stream(
+        self, request: dict[str, object],
+        upstream_base_url: str, upstream_model: str,
+        api_key: str, resp_id: str,
+    ) -> bool:
+        """Stream Chat Completions and convert deltas to Responses SSE events.
+
+        Returns True if the relay handled the response, False on connection error.
+        """
+        payload = responses_request_to_chat_payload(request, upstream_model, True)
+        upstream_req = urllib.request.Request(
+            chat_completions_url(upstream_base_url),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            response = urllib.request.urlopen(upstream_req, timeout=1800)
+        except Exception:
+            return False
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        msg_id = f"msg_{uuid.uuid4().hex}"
+        item_id = f"item_{uuid.uuid4().hex}"
+        self.write_sse("response.created", {
+            "type": "response.created",
+            "response": {
+                "id": resp_id, "object": "response",
+                "created_at": int(time.time()), "status": "in_progress",
+                "model": upstream_model, "output": [],
+            },
+        })
+        self.write_sse("response.output_item.added", {
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"type": "message", "id": item_id, "status": "in_progress",
+                      "role": "assistant", "content": []},
+        })
+        self.write_sse("response.content_part.added", {
+            "type": "response.content_part.added", "output_index": 0,
+            "content_index": 0, "item_id": item_id,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        })
+
+        full_text = ""
+        tool_calls: dict[int, dict[str, str]] = {}
+        finish_reason = None
+        usage_data: dict[str, object] = {}
+        stream_ok = False
+        try:
+            buf = b""
+            for chunk in response:
+                buf += chunk
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        stream_ok = True
+                        break
+                    try:
+                        delta_obj = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = delta_obj.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        if delta_obj.get("usage"):
+                            usage_data = delta_obj["usage"]
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        continue
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        finish_reason = fr
+                    delta = choice.get("delta")
+                    if not isinstance(delta, dict):
+                        continue
+                    text_chunk = delta.get("content")
+                    if isinstance(text_chunk, str) and text_chunk:
+                        full_text += text_chunk
+                        self.write_sse("response.output_text.delta", {
+                            "type": "response.output_text.delta",
+                            "output_index": 0, "content_index": 0,
+                            "item_id": item_id, "delta": text_chunk,
+                        })
+                    tc = delta.get("tool_calls")
+                    if isinstance(tc, list):
+                        for t in tc:
+                            if not isinstance(t, dict):
+                                continue
+                            idx = t.get("index", 0)
+                            if idx not in tool_calls:
+                                tool_calls[idx] = {
+                                    "id": str(t.get("id") or f"call_{uuid.uuid4().hex}"),
+                                    "name": "", "arguments": "",
+                                }
+                            if isinstance(t.get("id"), str):
+                                tool_calls[idx]["id"] = t["id"]
+                            fn = t.get("function")
+                            if isinstance(fn, dict):
+                                if isinstance(fn.get("name"), str):
+                                    tool_calls[idx]["name"] += fn["name"]
+                                if isinstance(fn.get("arguments"), str):
+                                    tool_calls[idx]["arguments"] += fn["arguments"]
+                    if not isinstance(delta_obj.get("usage"), dict):
+                        u = delta_obj.get("usage")
+                        if isinstance(u, dict):
+                            usage_data = u
+                if stream_ok:
+                    break
+            stream_ok = True
+        except Exception:
+            pass
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        try:
+            if tool_calls:
+                self.write_sse("response.content_part.done", {
+                    "type": "response.content_part.done", "output_index": 0,
+                    "content_index": 0, "item_id": item_id,
+                    "part": {"type": "output_text", "text": full_text, "annotations": []},
+                })
+                self.write_sse("response.output_item.done", {
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": {"type": "message", "id": item_id, "status": "completed",
+                              "role": "assistant",
+                              "content": [{"type": "output_text", "text": full_text, "annotations": []}]},
+                })
+                for tc_idx, tc in sorted(tool_calls.items()):
+                    fc_item_id = f"fc_{uuid.uuid4().hex}"
+                    fc_item = {
+                        "type": "function_call", "id": fc_item_id,
+                        "call_id": tc["id"], "name": tc["name"],
+                        "arguments": tc["arguments"], "status": "completed",
+                    }
+                    out_idx = 1 + tc_idx
+                    self.write_sse("response.output_item.added", {
+                        "type": "response.output_item.added", "output_index": out_idx,
+                        "item": dict(fc_item, status="in_progress"),
+                    })
+                    if tc["arguments"]:
+                        self.write_sse("response.function_call_arguments.delta", {
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": out_idx, "item_id": fc_item_id,
+                            "delta": tc["arguments"],
+                        })
+                    self.write_sse("response.function_call_arguments.done", {
+                        "type": "response.function_call_arguments.done",
+                        "output_index": out_idx, "item_id": fc_item_id,
+                        "arguments": tc["arguments"],
+                    })
+                    self.write_sse("response.output_item.done", {
+                        "type": "response.output_item.done",
+                        "output_index": out_idx, "item": fc_item,
+                    })
+                output_items: list[dict[str, object]] = [{
+                    "type": "message", "id": item_id, "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                }]
+                for tc_idx, tc in sorted(tool_calls.items()):
+                    output_items.append({
+                        "type": "function_call", "id": f"fc_{uuid.uuid4().hex}",
+                        "call_id": tc["id"], "name": tc["name"],
+                        "arguments": tc["arguments"], "status": "completed",
+                    })
+            else:
+                self.write_sse("response.output_text.done", {
+                    "type": "response.output_text.done", "output_index": 0,
+                    "content_index": 0, "item_id": item_id, "text": full_text,
+                })
+                self.write_sse("response.content_part.done", {
+                    "type": "response.content_part.done", "output_index": 0,
+                    "content_index": 0, "item_id": item_id,
+                    "part": {"type": "output_text", "text": full_text, "annotations": []},
+                })
+                self.write_sse("response.output_item.done", {
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": {"type": "message", "id": item_id, "status": "completed",
+                              "role": "assistant",
+                              "content": [{"type": "output_text", "text": full_text, "annotations": []}]},
+                })
+                output_items = [{
+                    "type": "message", "id": item_id, "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                }]
+
+            usage = {
+                "input_tokens": usage_data.get("input_tokens") or usage_data.get("prompt_tokens") or 0,
+                "output_tokens": usage_data.get("output_tokens") or usage_data.get("completion_tokens") or 0,
+                "total_tokens": usage_data.get("total_tokens") or 0,
+            }
+            completed_response = {
+                "id": resp_id, "object": "response",
+                "created_at": int(time.time()), "status": "completed",
+                "model": upstream_model, "output": output_items, "usage": usage,
+            }
+            self.write_sse("response.completed", {"type": "response.completed", "response": completed_response})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except Exception:
+            pass
+        return True
 
     def relay_responses_stream(
         self, request: dict[str, object],
