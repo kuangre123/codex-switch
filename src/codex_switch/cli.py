@@ -1097,7 +1097,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(upstream_request, timeout=120) as response:
+            with urllib.request.urlopen(upstream_request, timeout=600) as response:
                 chat = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
@@ -1153,7 +1153,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(upstream_req, timeout=120) as resp:
+            with urllib.request.urlopen(upstream_req, timeout=600) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
         except Exception:
             return None
@@ -1193,7 +1193,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            response = urllib.request.urlopen(upstream_req, timeout=600)
+            response = urllib.request.urlopen(upstream_req, timeout=1800)
         except Exception:
             return False
         content_type = (response.headers.get("Content-Type") or "").lower()
@@ -1207,15 +1207,35 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        stream_ok = False
         try:
             for chunk in response:
                 self.wfile.write(chunk)
                 self.wfile.flush()
+            stream_ok = True
         except Exception:
             pass
         finally:
             try:
                 response.close()
+            except Exception:
+                pass
+        if not stream_ok:
+            try:
+                self.write_sse("response.failed", {
+                    "type": "response.failed",
+                    "response": {
+                        "id": f"resp_{uuid.uuid4().hex}",
+                        "object": "response",
+                        "created_at": int(time.time()),
+                        "status": "failed",
+                        "model": upstream_model,
+                        "output": [],
+                        "error": {"message": "upstream stream disconnected before completion"},
+                    },
+                })
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
             except Exception:
                 pass
         return True
