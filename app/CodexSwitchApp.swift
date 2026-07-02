@@ -777,8 +777,29 @@ struct ContentView: View {
     }
 }
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    // With the New-Window command removed, WindowGroup never recreates the
+    // window after the last one closes, leaving a windowless process that a
+    // Dock click can't revive. Quit together with the window instead, so a
+    // Dock click always launches fresh with a window.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            for window in sender.windows where window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+        }
+        return true
+    }
+}
+
 @main
 struct CodexSwitchApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
