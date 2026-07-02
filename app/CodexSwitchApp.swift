@@ -376,18 +376,26 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            statusCard
-            settingsCard
-            if !model.output.isEmpty {
-                outputCard
+        // The form is taller than some screens (e.g. scaled 13" displays), so the
+        // content scrolls while the primary action stays pinned at the bottom —
+        // the save button is always visible no matter the window height.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                statusCard
+                settingsCard
+                if !model.output.isEmpty {
+                    outputCard
+                }
+                footer
             }
-            Spacer(minLength: 0)
-            footer
+            .padding(24)
         }
-        .padding(24)
-        .frame(minWidth: 660, minHeight: targetMode == .custom ? 520 : 460)
+        .scrollIndicators(.visible)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            actionBar
+        }
+        .frame(minWidth: 660, idealWidth: 700, minHeight: 440, idealHeight: 640)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -595,19 +603,27 @@ struct ContentView: View {
                         }
                     }
                 }
-
-                Button {
-                    model.switchProvider(to: targetMode, target: targetTool)
-                } label: {
-                    Label(primaryButtonTitle, systemImage: targetTool == .codex ? "square.and.arrow.down" : "arrow.triangle.2.circlepath")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(model.isBusy)
             }
             .padding(.top, 6)
         }
+    }
+
+    private var actionBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Button {
+                model.switchProvider(to: targetMode, target: targetTool)
+            } label: {
+                Label(primaryButtonTitle, systemImage: targetTool == .codex ? "square.and.arrow.down" : "arrow.triangle.2.circlepath")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.isBusy)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+        }
+        .background(.bar)
     }
 
     private var progressText: String {
