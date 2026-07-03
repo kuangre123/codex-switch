@@ -737,6 +737,132 @@ class CodexSwitchTests(unittest.TestCase):
             )
             self.assertNotIn("official_auth", read_state(home))
 
+    def test_configure_skip_login_stashes_tokens_and_configure_restores_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": "sk-test-secret",
+                    "last_refresh": "2026-07-01T00:00:00Z",
+                    "tokens": {"access_token": "acc", "refresh_token": "ref"},
+                }),
+                encoding="utf-8",
+            )
+
+            configure_args = [
+                "configure",
+                "--base-url", "https://custom.example/v1",
+                "--custom-model", "vendor/custom-model",
+                "--official-model", "gpt-official",
+            ]
+            result = run_tool(home, *configure_args, "--skip-login")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            self.assertEqual(auth["auth_mode"], "api-key")
+            self.assertNotIn("tokens", auth)
+            stash = read_state(home)["stashed_chatgpt_login"]
+            self.assertEqual(stash["tokens"], {"access_token": "acc", "refresh_token": "ref"})
+            self.assertEqual(stash["last_refresh"], "2026-07-01T00:00:00Z")
+
+            result = run_tool(home, *configure_args)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Restored the stashed ChatGPT login", result.stdout)
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            self.assertEqual(auth["auth_mode"], "chatgpt")
+            self.assertEqual(auth["tokens"], {"access_token": "acc", "refresh_token": "ref"})
+            self.assertEqual(auth["last_refresh"], "2026-07-01T00:00:00Z")
+            self.assertNotIn("stashed_chatgpt_login", read_state(home))
+
+    def test_official_switch_restores_stashed_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({
+                    "stashed_chatgpt_login": {
+                        "tokens": {"access_token": "acc", "refresh_token": "ref"},
+                        "last_refresh": "2026-07-01T00:00:00Z",
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "api-key", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "official")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Restored the stashed ChatGPT login", result.stdout)
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            self.assertEqual(auth["auth_mode"], "chatgpt")
+            self.assertEqual(auth["tokens"], {"access_token": "acc", "refresh_token": "ref"})
+            self.assertEqual(auth["last_refresh"], "2026-07-01T00:00:00Z")
+            self.assertNotIn("stashed_chatgpt_login", read_state(home))
+
+    def test_configure_skip_login_twice_keeps_existing_stash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({
+                    "stashed_chatgpt_login": {
+                        "tokens": {"access_token": "acc", "refresh_token": "ref"},
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "api-key", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "configure",
+                "--base-url", "https://custom.example/v1",
+                "--custom-model", "vendor/custom-model",
+                "--official-model", "gpt-official",
+                "--skip-login",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stash = read_state(home)["stashed_chatgpt_login"]
+            self.assertEqual(stash["tokens"], {"access_token": "acc", "refresh_token": "ref"})
+
+    def test_restore_prefers_live_tokens_and_drops_stale_stash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({
+                    "stashed_chatgpt_login": {
+                        "tokens": {"access_token": "stale", "refresh_token": "stale"},
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(
+                json.dumps({
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": "sk-test-secret",
+                    "tokens": {"access_token": "fresh", "refresh_token": "fresh"},
+                }),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "official")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            self.assertEqual(auth["tokens"], {"access_token": "fresh", "refresh_token": "fresh"})
+            self.assertNotIn("stashed_chatgpt_login", read_state(home))
+
     def test_status_redacts_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"

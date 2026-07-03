@@ -146,6 +146,49 @@ def remember_current_auth(home: Path, auth: dict[str, object], state: dict[str, 
     state.pop("official_auth", None)
 
 
+STASHED_LOGIN_KEY = "stashed_chatgpt_login"
+
+
+def stash_login_tokens(auth: dict[str, object], state: dict[str, object]) -> None:
+    """Move the ChatGPT OAuth login from auth.json into the state file.
+
+    Skip-login must remove `tokens` from auth.json (Codex would otherwise keep
+    preferring the ChatGPT login), but deleting them forced a fresh OAuth login
+    on the next switch to the official provider. Stash them instead; the state
+    file has the same 0600 permissions as auth.json. When auth.json has no
+    tokens (already skipped before), any earlier stash is kept as-is.
+    """
+    tokens = auth.get("tokens")
+    if isinstance(tokens, dict) and tokens:
+        stash: dict[str, object] = {"tokens": tokens}
+        last_refresh = auth.get("last_refresh")
+        if last_refresh:
+            stash["last_refresh"] = last_refresh
+        state[STASHED_LOGIN_KEY] = stash
+
+
+def restore_login_tokens(auth: dict[str, object], state: dict[str, object]) -> bool:
+    """Put a stashed ChatGPT login back into auth.json for chatgpt-mode writes.
+
+    A live login in auth.json wins over the stash: the user re-logged in after
+    the stash was taken, so the stash is stale and gets dropped either way.
+    """
+    if isinstance(auth.get("tokens"), dict) and auth.get("tokens"):
+        state.pop(STASHED_LOGIN_KEY, None)
+        return False
+    stash = state.pop(STASHED_LOGIN_KEY, None)
+    if not isinstance(stash, dict):
+        return False
+    tokens = stash.get("tokens")
+    if not isinstance(tokens, dict) or not tokens:
+        return False
+    auth["tokens"] = tokens
+    last_refresh = stash.get("last_refresh")
+    if last_refresh and not auth.get("last_refresh"):
+        auth["last_refresh"] = last_refresh
+    return True
+
+
 def backup_file(path: Path, backup_dir: Path) -> Path | None:
     if not path.exists():
         return None
@@ -1604,10 +1647,15 @@ def switch_local(args: argparse.Namespace) -> int:
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     backup_file(catalog_path, backup_dir)
-    save_state(home, state)
     auth["OPENAI_API_KEY"] = api_key
     auth["auth_mode"] = "chatgpt"
+    restored_login = restore_login_tokens(auth, state)
+    # auth.json first: a crash before save_state leaves the stash in place,
+    # which the next restore harmlessly drops in favor of the live tokens.
     write_auth(auth_path, auth)
+    save_state(home, state)
+    if restored_login:
+        print("Restored the stashed ChatGPT login; no re-login needed.")
     # Never write a custom model_catalog_json (see configure_codex). Switching
     # only changes config.toml; conversations are never touched.
     if catalog_path.exists():
@@ -1638,11 +1686,16 @@ def switch_official(args: argparse.Namespace) -> int:
     remember_current_auth(home, auth, state)
     model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
     auth["auth_mode"] = "chatgpt"
+    restored_login = restore_login_tokens(auth, state)
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
-    save_state(home, state)
+    # auth.json first: a crash before save_state leaves the stash in place,
+    # which the next restore harmlessly drops in favor of the live tokens.
     write_auth(auth_path, auth)
+    save_state(home, state)
+    if restored_login:
+        print("Restored the stashed ChatGPT login; no re-login needed.")
     config = rewrite_config_for_official(read_config(config_path), model)
     atomic_write(config_path, config, 0o600)
 
@@ -1728,15 +1781,24 @@ def configure_codex(args: argparse.Namespace) -> int:
     provider_base_url = DEFAULT_ADAPTER_BASE_URL
     skip_login = getattr(args, "skip_login", False)
     state["skip_login"] = "true" if skip_login else "false"
-    save_state(home, state)
 
     auth["OPENAI_API_KEY"] = api_key
+    # Write ordering matters: whichever file still holds the login must be
+    # written second, so a crash between the two writes never loses it (the
+    # next restore prefers live auth.json tokens and drops the stash).
     if skip_login:
+        stash_login_tokens(auth, state)
         auth["auth_mode"] = "api-key"
         auth.pop("tokens", None)
+        save_state(home, state)
+        write_auth(auth_path, auth)
     else:
         auth["auth_mode"] = "chatgpt"
-    write_auth(auth_path, auth)
+        restored_login = restore_login_tokens(auth, state)
+        write_auth(auth_path, auth)
+        save_state(home, state)
+        if restored_login:
+            print("Restored the stashed ChatGPT login; no re-login needed.")
     # cc-switch lesson: never write a custom model_catalog_json. It REPLACES
     # Codex's built-in catalog (shrinking the official model list and breaking
     # model resolution), and a single malformed catalog makes Codex fail to load
