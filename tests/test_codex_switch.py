@@ -1051,7 +1051,8 @@ class CodexSwitchTests(unittest.TestCase):
             write_thread_database(home)
             args = SimpleNamespace(restart_codex=True, migrate_latest=False)
 
-            with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
+            run_ok = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
+            with mock.patch.object(cli_module.subprocess, "run", run_ok), mock.patch.object(cli_module.time, "sleep"):
                 cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
@@ -1061,6 +1062,41 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(providers, {"openai", "custom"})
             self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
 
+    def test_restart_launch_failure_warns_instead_of_failing(self) -> None:
+        # LaunchServices can refuse to relaunch (-609) while the old process is
+        # still terminating. The switch already succeeded by then, so restart
+        # must warn and return instead of raising.
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)  # openai/gpt-5: verification would raise for custom/gpt-5.5
+            args = SimpleNamespace(restart_codex=True, migrate_latest=False)
+
+            def fake_run(cmd, **kwargs):
+                if cmd[0] == "pgrep":
+                    return SimpleNamespace(returncode=1)
+                if cmd[0] == "open":
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr="_LSOpenURLsWithCompletionHandler() failed with error -609.",
+                    )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            captured = io.StringIO()
+            with mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run) as run_mock, \
+                    mock.patch.object(cli_module.time, "sleep"):
+                from contextlib import redirect_stdout
+                with redirect_stdout(captured):
+                    cli_module.restart_codex(args, home, "custom", "gpt-5.5")
+
+            output = captured.getvalue()
+            self.assertIn("restart_warn", output)
+            self.assertIn("error -609", output)
+            self.assertNotIn("Restarted Codex.app", output)
+            # The relaunch was retried before giving up.
+            open_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "open"]
+            self.assertEqual(len(open_calls), 3)
+
     def test_restart_does_not_touch_conversations_on_provider_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -1069,7 +1105,8 @@ class CodexSwitchTests(unittest.TestCase):
             rollout = write_rollout(home, "current-custom", "custom")
             args = SimpleNamespace(restart_codex=True, migrate_latest=True)
 
-            with mock.patch.object(cli_module.subprocess, "run"), mock.patch.object(cli_module.time, "sleep"):
+            run_ok = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
+            with mock.patch.object(cli_module.subprocess, "run", run_ok), mock.patch.object(cli_module.time, "sleep"):
                 with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider/model openai/gpt-5, not custom/gpt-5.5"):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 

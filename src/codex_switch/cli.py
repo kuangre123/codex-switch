@@ -1597,7 +1597,20 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    time.sleep(1.5)
+    # Relaunching while the old process is still terminating makes
+    # LaunchServices fail with -609 (connectionInvalid). A fixed pause is not
+    # enough: a Codex with hundreds of threads takes several seconds to flush
+    # state on quit, so poll until the process is actually gone (up to ~15s).
+    for _ in range(30):
+        probe = subprocess.run(
+            ["pgrep", "-x", "Codex"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if probe.returncode != 0:
+            break
+        time.sleep(0.5)
     # NOTE: We intentionally do NOT rewrite existing conversations' provider or
     # model here. The desktop app does not filter the conversation list by
     # model_provider (verified: custom-tagged threads stay visible and openable
@@ -1606,7 +1619,21 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, 
     # real model, which is the opposite of this app's whole purpose (keep your
     # conversations intact across switches). Switching only changes the active
     # provider/model in config.toml; saved conversations keep their own metadata.
-    subprocess.run(["open", "-a", "Codex"], check=True)
+    launched = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2.0)
+        launched = subprocess.run(["open", "-a", "Codex"], check=False, capture_output=True, text=True)
+        if launched.returncode == 0:
+            break
+    if launched is None or launched.returncode != 0:
+        # The switch itself already succeeded by this point; a failed relaunch
+        # must not report the whole operation as failed.
+        print("restart_warn: 配置已保存成功，但自动重启 Codex 失败，请手动打开 Codex.app。")
+        detail = ((launched.stderr or launched.stdout or "").strip() if launched is not None else "")
+        if detail:
+            print(detail)
+        return
     time.sleep(RESTART_SETTLE_SECONDS)
     config = read_config(home / "config.toml")
     actual_provider = configured_provider(config)
