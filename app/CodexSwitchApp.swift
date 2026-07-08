@@ -49,6 +49,7 @@ struct ProviderPreset: Identifiable {
         ProviderPreset(id: "qwen", name: "通义千问 Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen3-coder-plus", displayName: "通义千问"),
         ProviderPreset(id: "doubao", name: "豆包 Doubao（火山引擎）", baseURL: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-seed-1-6-251015", displayName: "豆包"),
         ProviderPreset(id: "baidu", name: "百度文心 ERNIE（千帆）", baseURL: "https://qianfan.baidubce.com/v2", model: "ernie-4.5-turbo-128k", displayName: "文心一言"),
+        ProviderPreset(id: "xiaomi", name: "小米 MiMo", baseURL: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro", displayName: "小米 MiMo"),
         ProviderPreset(id: "minimax", name: "MiniMax", baseURL: "https://api.minimaxi.com/v1", model: "MiniMax-M2", displayName: "MiniMax"),
         ProviderPreset(id: "stepfun", name: "阶跃星辰 StepFun", baseURL: "https://api.stepfun.com/v1", model: "step-3.7-flash", displayName: "StepFun"),
     ]
