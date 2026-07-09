@@ -559,7 +559,37 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertTrue(attempt["stream"])
             self.assertIn("tools", attempt)
 
+    def test_responses_relay_remembers_unsupported_route(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+        handler = self._make_adapter_handler()
+        call_count = 0
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b'{"error":{"message":"Model glm-5.2 does not support /v1/responses"}}'),
+            )
+
+        request = {"input": [], "store": False, "reasoning": {"effort": "medium"}}
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            first = handler.relay_responses_stream(request, "https://relay.example", "glm-5.2", "sk-x", [])
+            calls_after_first = call_count
+            errors: list[str] = []
+            second = handler.relay_responses_stream(request, "https://relay.example", "glm-5.2", "sk-x", errors)
+
+        self.assertFalse(first)
+        # First request exhausted every sanitize tier (full + 2 sanitized)...
+        self.assertEqual(calls_after_first, 3)
+        # ...then the route is remembered: no further /responses round-trips.
+        self.assertFalse(second)
+        self.assertEqual(call_count, calls_after_first)
+        self.assertTrue(any("skipped" in e for e in errors))
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+
     def test_responses_relay_retries_sanitized_payload_after_400(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         handler = self._make_adapter_handler()
         sse_body = b"event: response.completed\ndata: {}\n\ndata: [DONE]\n\n"
         sent_payloads = []
@@ -587,6 +617,7 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertTrue(any("HTTP 400" in e and "store" in e for e in errors))
 
     def test_responses_relay_synthesizes_stream_from_json_response(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         handler = self._make_adapter_handler()
         complete = {
             "id": "resp_upstream", "object": "response", "status": "completed",
@@ -616,6 +647,7 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertIn('"input_tokens": 3', stream)
 
     def test_stream_failure_reports_upstream_diagnostics(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             home.mkdir(parents=True)

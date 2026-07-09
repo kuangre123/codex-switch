@@ -828,6 +828,14 @@ _RESPONSES_PASSTHROUGH_DROP_TIERS: tuple[tuple[str, ...], ...] = (
 # removing fields.
 _SANITIZE_RETRY_CODES = {400, 415, 422}
 
+# Routes (base_url, model) whose /v1/responses endpoint decisively rejected
+# even the most sanitized payload. Remembered for the adapter's lifetime so
+# every subsequent request goes straight to the chat bridge instead of paying
+# 3 rejected round-trips first — which also multiplies rate-limit pressure on
+# the relay during Codex's automatic reconnects. The adapter is restarted on
+# every config save, so this never pins a stale verdict across saves.
+_RESPONSES_UNSUPPORTED_ROUTES: set[tuple[str, str]] = set()
+
 
 def responses_passthrough_payloads(request: dict[str, object], upstream_model: str, stream: bool) -> list[dict[str, object]]:
     """Payload attempts for native /v1/responses passthrough, most complete first."""
@@ -1205,6 +1213,10 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         api_key: str, resp_id: str,
         errors: list[str] | None = None,
     ) -> dict[str, object] | None:
+        route = (upstream_base_url, upstream_model)
+        if route in _RESPONSES_UNSUPPORTED_ROUTES:
+            _append_error(errors, "/responses → skipped (upstream rejected it earlier)")
+            return None
         for payload in responses_passthrough_payloads(request, upstream_model, False):
             upstream_req = urllib.request.Request(
                 responses_url(upstream_base_url),
@@ -1221,6 +1233,9 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     result = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
+                if exc.code in {404, 405}:
+                    _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+                    return None
                 if exc.code in _SANITIZE_RETRY_CODES:
                     continue
                 return None
@@ -1239,6 +1254,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     "total_tokens": raw_usage.get("total_tokens") or 0,
                 }
             return result
+        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
         return None
 
     def relay_chat_stream(
@@ -1519,6 +1535,10 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         the caller falls back to the chat-completions bridge, with the reason
         for each failed attempt appended to `errors`.
         """
+        route = (upstream_base_url, upstream_model)
+        if route in _RESPONSES_UNSUPPORTED_ROUTES:
+            _append_error(errors, "/responses → skipped (upstream rejected it earlier)")
+            return False
         for payload in responses_passthrough_payloads(request, upstream_model, True):
             upstream_req = urllib.request.Request(
                 responses_url(upstream_base_url),
@@ -1535,6 +1555,9 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 response = urllib.request.urlopen(upstream_req, timeout=1800)
             except urllib.error.HTTPError as exc:
                 _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
+                if exc.code in {404, 405}:
+                    _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+                    return False
                 if exc.code in _SANITIZE_RETRY_CODES:
                     continue
                 return False
@@ -1545,6 +1568,9 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             if "text/event-stream" not in content_type:
                 return self.synthesize_stream_from_responses_json(response, upstream_model, errors)
             return self._relay_sse_body(response, upstream_model)
+        # Even the most sanitized payload was rejected: the endpoint/model
+        # combination doesn't do Responses, so stop asking.
+        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
         return False
 
     def synthesize_stream_from_responses_json(
