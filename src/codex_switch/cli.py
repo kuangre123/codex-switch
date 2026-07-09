@@ -864,6 +864,25 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
+# Above roughly this size, a send-phase connection drop is almost certainly the
+# relay's request-body cap (nginx defaults to client_max_body_size 1m; ICE
+# measured: 0.96MB accepted, 1.75MB dropped) — deterministic, so retrying only
+# wastes ~60s per attempt. Below it, treat the drop as transient and retry.
+_BODY_CAP_HINT_BYTES = 900 * 1024
+
+
+def _is_connection_drop(exc: Exception) -> bool:
+    """True for send/connect-phase drops: broken pipe, connection reset, or
+    the server closing without a response — also when wrapped in URLError."""
+    probe: object = exc
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        probe = exc.reason
+    if isinstance(probe, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    text = str(probe)
+    return "Broken pipe" in text or "Remote end closed connection" in text or "Connection reset" in text
+
+
 # HTTP statuses that mean the endpoint/model/key is clearly wrong (worth
 # blocking the save). 429 / 5xx / connection errors are transient and must not.
 _PROBE_CONFIG_ERROR_CODES = {400, 401, 403, 404, 405, 422}
@@ -1280,6 +1299,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             },
             method="POST",
         )
+        body_size = len(upstream_req.data or b"")
         response = None
         last_error: Exception | None = None
         for attempt in range(3):
@@ -1293,9 +1313,18 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 _append_error(errors, f"/chat/completions → HTTP {exc.code} {_http_error_detail(exc)}".strip())
                 return False
             except Exception as exc:
-                # e.g. RemoteDisconnected: relays under load/WAF pressure close
-                # the connection without any response. Nothing has been sent to
-                # Codex yet, so the request is safe to retry.
+                if _is_connection_drop(exc) and body_size > _BODY_CAP_HINT_BYTES:
+                    # Deterministic body-cap rejection: don't burn retries on it,
+                    # tell the user how to get back under the limit instead.
+                    _append_error(
+                        errors,
+                        f"/chat/completions → 连接被上游中断（请求体 {body_size / 1048576:.1f}MB）。"
+                        "中转站通常限制请求体约 1MB，当前会话上下文过长——请在 Codex 中执行 /compact 压缩会话，或开启新会话",
+                    )
+                    return False
+                # Otherwise (e.g. RemoteDisconnected on a small request): relays
+                # under load close connections without answering. Nothing has
+                # been sent to Codex yet, so the request is safe to retry.
                 last_error = exc
         if response is None:
             _append_error(errors, f"/chat/completions → {last_error} (3 attempts)")

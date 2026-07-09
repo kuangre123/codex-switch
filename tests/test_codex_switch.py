@@ -674,6 +674,28 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertIn("response.output_text.delta", stream)
         self.assertIn("response.completed", stream)
 
+    def test_chat_relay_body_cap_rejection_skips_retries_and_hints_compact(self) -> None:
+        handler = self._make_adapter_handler()
+        attempts = 0
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal attempts
+            attempts += 1
+            raise urllib.error.URLError(BrokenPipeError(32, "Broken pipe"))
+
+        # Instructions large enough that the converted chat payload exceeds the cap hint.
+        big_request = {"instructions": "x" * (1024 * 1024), "input": []}
+        errors: list[str] = []
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen), \
+                mock.patch.object(cli_module.time, "sleep"):
+            handled = handler.relay_chat_stream(big_request, "https://relay.example", "glm-5.2", "sk-x", "resp_1", errors)
+
+        self.assertFalse(handled)
+        # Deterministic cap rejection: exactly one attempt, no retries.
+        self.assertEqual(attempts, 1)
+        self.assertTrue(any("/compact" in e for e in errors), errors)
+        self.assertTrue(any("MB" in e for e in errors), errors)
+
     def test_stream_failure_reports_upstream_diagnostics(self) -> None:
         cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         with tempfile.TemporaryDirectory() as temp:
