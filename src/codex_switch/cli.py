@@ -814,6 +814,48 @@ def responses_url(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
+# Fields from Codex's Responses requests that third-party / relay Responses
+# implementations most often reject with 400: OpenAI-bookkeeping fields first,
+# generation-tuning fields as a last resort. Tools are never dropped — losing
+# function calls would silently break Codex.
+_RESPONSES_PASSTHROUGH_DROP_TIERS: tuple[tuple[str, ...], ...] = (
+    ("store", "include", "prompt_cache_key", "safety_identifier", "service_tier", "stream_options", "user", "metadata"),
+    ("reasoning", "text", "truncation"),
+)
+
+# Statuses that suggest the upstream rejected a request field, so a sanitized
+# retry may succeed. Anything else (401/403/404/429/5xx) won't be fixed by
+# removing fields.
+_SANITIZE_RETRY_CODES = {400, 415, 422}
+
+
+def responses_passthrough_payloads(request: dict[str, object], upstream_model: str, stream: bool) -> list[dict[str, object]]:
+    """Payload attempts for native /v1/responses passthrough, most complete first."""
+    base = dict(request)
+    base["model"] = upstream_model
+    base["stream"] = stream
+    attempts = [base]
+    dropped: set[str] = set()
+    for tier in _RESPONSES_PASSTHROUGH_DROP_TIERS:
+        dropped.update(tier)
+        candidate = {key: value for key, value in base.items() if key not in dropped}
+        if len(candidate) != len(attempts[-1]):
+            attempts.append(candidate)
+    return attempts
+
+
+def _append_error(errors: list[str] | None, message: str) -> None:
+    if errors is not None:
+        errors.append(message[:300])
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read(500).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
 # HTTP statuses that mean the endpoint/model/key is clearly wrong (worth
 # blocking the save). 429 / 5xx / connection errors are transient and must not.
 _PROBE_CONFIG_ERROR_CODES = {400, 401, 403, 404, 405, 422}
@@ -1102,10 +1144,14 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         resp_id = f"resp_{uuid.uuid4().hex}"
 
         if stream:
-            if self.relay_responses_stream(request, upstream_base_url, upstream_model, api_key):
+            errors: list[str] = []
+            if self.relay_responses_stream(request, upstream_base_url, upstream_model, api_key, errors):
                 return
-            if self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id):
+            if self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id, errors):
                 return
+            message = "upstream did not return a usable response"
+            if errors:
+                message += ": " + " ; ".join(errors)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1116,13 +1162,18 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     "id": resp_id, "object": "response",
                     "created_at": int(time.time()), "status": "failed",
                     "model": upstream_model, "output": [],
-                    "error": {"message": "upstream did not return a usable response"},
+                    "error": {"message": message},
                 },
             })
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return
 
+        errors = []
+        passthrough = self.passthrough_responses(request, upstream_base_url, upstream_model, api_key, resp_id, errors)
+        if passthrough is not None:
+            self.send_json(200, passthrough)
+            return
         payload = responses_request_to_chat_payload(request, upstream_model, False)
         upstream_request = urllib.request.Request(
             chat_completions_url(upstream_base_url),
@@ -1139,6 +1190,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 chat = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if errors:
+                error_body += " ; " + " ; ".join(errors)
             self.send_json(exc.code, {"error": {"message": error_body}})
             return
 
@@ -1149,46 +1202,55 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
     def passthrough_responses(
         self, request: dict[str, object],
         upstream_base_url: str, upstream_model: str,
-        api_key: str, resp_id: str, stream: bool,
+        api_key: str, resp_id: str,
+        errors: list[str] | None = None,
     ) -> dict[str, object] | None:
-        passthrough_body = dict(request)
-        passthrough_body["model"] = upstream_model
-        passthrough_body["stream"] = False
-        upstream_req = urllib.request.Request(
-            responses_url(upstream_base_url),
-            data=json.dumps(passthrough_body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(upstream_req, timeout=600) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return None
-        if not isinstance(result, dict):
-            return None
-        result["id"] = resp_id
-        raw_usage = result.get("usage") or {}
-        if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
-            result["usage"] = {
-                "input_tokens": raw_usage.get("input_tokens") or raw_usage.get("prompt_tokens") or 0,
-                "output_tokens": raw_usage.get("output_tokens") or raw_usage.get("completion_tokens") or 0,
-                "total_tokens": raw_usage.get("total_tokens") or 0,
-            }
-        return result
+        for payload in responses_passthrough_payloads(request, upstream_model, False):
+            upstream_req = urllib.request.Request(
+                responses_url(upstream_base_url),
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": UPSTREAM_USER_AGENT,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(upstream_req, timeout=600) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
+                if exc.code in _SANITIZE_RETRY_CODES:
+                    continue
+                return None
+            except Exception as exc:
+                _append_error(errors, f"/responses → {exc}")
+                return None
+            if not isinstance(result, dict) or not isinstance(result.get("output"), list):
+                _append_error(errors, "/responses → JSON response has no output")
+                return None
+            result["id"] = resp_id
+            raw_usage = result.get("usage") or {}
+            if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
+                result["usage"] = {
+                    "input_tokens": raw_usage.get("input_tokens") or raw_usage.get("prompt_tokens") or 0,
+                    "output_tokens": raw_usage.get("output_tokens") or raw_usage.get("completion_tokens") or 0,
+                    "total_tokens": raw_usage.get("total_tokens") or 0,
+                }
+            return result
+        return None
 
     def relay_chat_stream(
         self, request: dict[str, object],
         upstream_base_url: str, upstream_model: str,
         api_key: str, resp_id: str,
+        errors: list[str] | None = None,
     ) -> bool:
         """Stream Chat Completions and convert deltas to Responses SSE events.
 
-        Returns True if the relay handled the response, False on connection error.
+        Returns True if the relay handled the response, False on connection
+        error or upstream rejection (reason appended to `errors`).
         """
         payload = responses_request_to_chat_payload(request, upstream_model, True)
         upstream_req = urllib.request.Request(
@@ -1204,8 +1266,48 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         )
         try:
             response = urllib.request.urlopen(upstream_req, timeout=1800)
-        except Exception:
+        except urllib.error.HTTPError as exc:
+            _append_error(errors, f"/chat/completions → HTTP {exc.code} {_http_error_detail(exc)}".strip())
             return False
+        except Exception as exc:
+            _append_error(errors, f"/chat/completions → {exc}")
+            return False
+
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in content_type:
+            # The upstream ignored stream=true and returned the complete chat
+            # response: convert it and synthesize the SSE stream.
+            try:
+                raw = response.read().decode("utf-8", errors="replace")
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            try:
+                chat = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                _append_error(errors, f"/chat/completions → non-SSE body was not JSON: {exc}")
+                return False
+            if not isinstance(chat, dict) or not chat.get("choices"):
+                _append_error(errors, f"/chat/completions → JSON response has no choices: {raw[:200]}")
+                return False
+            result = chat_response_to_responses(chat, upstream_model)
+            result["id"] = resp_id
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.write_sse("response.created", {
+                "type": "response.created",
+                "response": {
+                    "id": resp_id, "object": "response",
+                    "created_at": int(time.time()), "status": "in_progress",
+                    "model": upstream_model, "output": [],
+                },
+            })
+            self.write_response_stream(result)
+            return True
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -1404,38 +1506,92 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
     def relay_responses_stream(
         self, request: dict[str, object],
         upstream_base_url: str, upstream_model: str, api_key: str,
+        errors: list[str] | None = None,
     ) -> bool:
         """Relay the upstream's native /v1/responses SSE stream straight to Codex.
 
-        Returns True if the relay handled the response (headers + body written),
-        or False if the upstream did not return an event stream, so the caller
-        can fall back to the chat-completions bridge.
+        Sends the full Codex request first, then progressively sanitized copies
+        when the upstream rejects it with 400/415/422 — relays that do support
+        the Responses protocol often reject OpenAI-bookkeeping fields such as
+        store/include. An upstream that ignores stream=true and answers with
+        the complete JSON object is synthesized into SSE events instead of
+        being discarded. Returns True if the response was handled; on False
+        the caller falls back to the chat-completions bridge, with the reason
+        for each failed attempt appended to `errors`.
         """
-        body = dict(request)
-        body["model"] = upstream_model
-        body["stream"] = True
-        upstream_req = urllib.request.Request(
-            responses_url(upstream_base_url),
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "text/event-stream",
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-            method="POST",
-        )
+        for payload in responses_passthrough_payloads(request, upstream_model, True):
+            upstream_req = urllib.request.Request(
+                responses_url(upstream_base_url),
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "text/event-stream",
+                    "User-Agent": UPSTREAM_USER_AGENT,
+                },
+                method="POST",
+            )
+            try:
+                response = urllib.request.urlopen(upstream_req, timeout=1800)
+            except urllib.error.HTTPError as exc:
+                _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
+                if exc.code in _SANITIZE_RETRY_CODES:
+                    continue
+                return False
+            except Exception as exc:
+                _append_error(errors, f"/responses → {exc}")
+                return False
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" not in content_type:
+                return self.synthesize_stream_from_responses_json(response, upstream_model, errors)
+            return self._relay_sse_body(response, upstream_model)
+        return False
+
+    def synthesize_stream_from_responses_json(
+        self, response: object, upstream_model: str, errors: list[str] | None = None,
+    ) -> bool:
+        """Turn a complete (non-SSE) Responses JSON object into the SSE stream
+        Codex expects — for upstreams that ignore stream=true."""
         try:
-            response = urllib.request.urlopen(upstream_req, timeout=1800)
-        except Exception:
-            return False
-        content_type = (response.headers.get("Content-Type") or "").lower()
-        if "text/event-stream" not in content_type:
+            raw = response.read().decode("utf-8", errors="replace")
+        finally:
             try:
                 response.close()
             except Exception:
                 pass
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _append_error(errors, f"/responses → non-SSE body was not JSON: {exc}")
             return False
+        if not isinstance(result, dict) or not isinstance(result.get("output"), list):
+            _append_error(errors, f"/responses → JSON response has no output: {raw[:200]}")
+            return False
+        resp_id = str(result.get("id") or f"resp_{uuid.uuid4().hex}")
+        result["id"] = resp_id
+        raw_usage = result.get("usage") or {}
+        if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
+            result["usage"] = {
+                "input_tokens": raw_usage.get("input_tokens") or raw_usage.get("prompt_tokens") or 0,
+                "output_tokens": raw_usage.get("output_tokens") or raw_usage.get("completion_tokens") or 0,
+                "total_tokens": raw_usage.get("total_tokens") or 0,
+            }
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.write_sse("response.created", {
+            "type": "response.created",
+            "response": {
+                "id": resp_id, "object": "response",
+                "created_at": int(time.time()), "status": "in_progress",
+                "model": upstream_model, "output": [],
+            },
+        })
+        self.write_response_stream(result)
+        return True
+
+    def _relay_sse_body(self, response: object, upstream_model: str) -> bool:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")

@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -512,6 +513,136 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertIn("event: response.function_call_arguments.delta", stream)
         self.assertIn("event: response.function_call_arguments.done", stream)
         self.assertIn("\"arguments\": \"{\\\"cmd\\\":\\\"pwd\\\"}\"", stream)
+
+    @staticmethod
+    def _make_adapter_handler() -> "cli_module.AdapterHandler":
+        handler = cli_module.AdapterHandler.__new__(cli_module.AdapterHandler)
+        handler.wfile = io.BytesIO()
+        handler.send_response = lambda code: None
+        handler.send_header = lambda key, value: None
+        handler.end_headers = lambda: None
+        return handler
+
+    class _FakeUpstreamResponse:
+        def __init__(self, body: bytes, content_type: str):
+            self._body = body
+            self.headers = {"Content-Type": content_type}
+
+        def read(self, *args):
+            return self._body
+
+        def close(self):
+            pass
+
+        def __iter__(self):
+            return iter([self._body])
+
+    def test_responses_passthrough_payload_sanitize_tiers(self) -> None:
+        request = {
+            "input": [], "tools": [{"type": "function", "name": "run_shell"}],
+            "store": False, "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "abc", "reasoning": {"effort": "medium"},
+        }
+        attempts = cli_module.responses_passthrough_payloads(request, "glm-5.2", True)
+
+        self.assertEqual(len(attempts), 3)
+        self.assertIn("store", attempts[0])
+        # Tier 1 drops OpenAI-bookkeeping fields but keeps generation tuning.
+        self.assertNotIn("store", attempts[1])
+        self.assertNotIn("include", attempts[1])
+        self.assertNotIn("prompt_cache_key", attempts[1])
+        self.assertIn("reasoning", attempts[1])
+        # Tier 2 drops generation tuning too; tools survive every tier.
+        self.assertNotIn("reasoning", attempts[2])
+        for attempt in attempts:
+            self.assertEqual(attempt["model"], "glm-5.2")
+            self.assertTrue(attempt["stream"])
+            self.assertIn("tools", attempt)
+
+    def test_responses_relay_retries_sanitized_payload_after_400(self) -> None:
+        handler = self._make_adapter_handler()
+        sse_body = b"event: response.completed\ndata: {}\n\ndata: [DONE]\n\n"
+        sent_payloads = []
+
+        def fake_urlopen(req, timeout=None):
+            sent_payloads.append(json.loads(req.data.decode("utf-8")))
+            if len(sent_payloads) == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 400, "Bad Request", {},
+                    io.BytesIO(b'{"error":{"message":"Unknown parameter: store"}}'),
+                )
+            return self._FakeUpstreamResponse(sse_body, "text/event-stream")
+
+        errors: list[str] = []
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            handled = handler.relay_responses_stream(
+                {"input": [], "store": False, "include": ["reasoning.encrypted_content"]},
+                "https://relay.example", "glm-5.2", "sk-x", errors,
+            )
+
+        self.assertTrue(handled)
+        self.assertIn(sse_body.decode("utf-8"), handler.wfile.getvalue().decode("utf-8"))
+        self.assertIn("store", sent_payloads[0])
+        self.assertNotIn("store", sent_payloads[1])
+        self.assertTrue(any("HTTP 400" in e and "store" in e for e in errors))
+
+    def test_responses_relay_synthesizes_stream_from_json_response(self) -> None:
+        handler = self._make_adapter_handler()
+        complete = {
+            "id": "resp_upstream", "object": "response", "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                "content": [{"type": "output_text", "text": "你好", "annotations": []}],
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        }
+
+        def fake_urlopen(req, timeout=None):
+            return self._FakeUpstreamResponse(
+                json.dumps(complete).encode("utf-8"), "application/json",
+            )
+
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            handled = handler.relay_responses_stream({"input": []}, "https://relay.example", "glm-5.2", "sk-x", [])
+
+        self.assertTrue(handled)
+        stream = handler.wfile.getvalue().decode("utf-8")
+        self.assertIn("event: response.created", stream)
+        self.assertIn("event: response.output_text.delta", stream)
+        self.assertIn("event: response.completed", stream)
+        self.assertIn("data: [DONE]", stream)
+        # Chat-style usage keys are normalized to Responses keys.
+        self.assertIn('"input_tokens": 3', stream)
+
+    def test_stream_failure_reports_upstream_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir(parents=True)
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({
+                    "adapter_upstream_base_url": "https://relay.example",
+                    "local_api_key": "sk-x",
+                    "local_upstream_model": "glm-5.2",
+                }),
+                encoding="utf-8",
+            )
+            (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-x"}), encoding="utf-8")
+            handler = self._make_adapter_handler()
+            handler.server = SimpleNamespace(home=home)
+
+            def fake_urlopen(req, timeout=None):
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b"no such route"))
+
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                handler.proxy_response({"stream": True, "input": []})
+
+            stream = handler.wfile.getvalue().decode("utf-8")
+            self.assertIn("response.failed", stream)
+            self.assertIn("HTTP 404", stream)
+            self.assertIn("/responses", stream)
+            self.assertIn("/chat/completions", stream)
+            self.assertIn("no such route", stream)
 
     def test_configure_codex_maps_duplicate_upstream_model_to_safe_custom_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
