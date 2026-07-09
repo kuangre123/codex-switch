@@ -1280,13 +1280,25 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             },
             method="POST",
         )
-        try:
-            response = urllib.request.urlopen(upstream_req, timeout=1800)
-        except urllib.error.HTTPError as exc:
-            _append_error(errors, f"/chat/completions → HTTP {exc.code} {_http_error_detail(exc)}".strip())
-            return False
-        except Exception as exc:
-            _append_error(errors, f"/chat/completions → {exc}")
+        response = None
+        last_error: Exception | None = None
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.5 * attempt)
+            try:
+                response = urllib.request.urlopen(upstream_req, timeout=1800)
+                break
+            except urllib.error.HTTPError as exc:
+                # The upstream answered — retrying the same request won't help.
+                _append_error(errors, f"/chat/completions → HTTP {exc.code} {_http_error_detail(exc)}".strip())
+                return False
+            except Exception as exc:
+                # e.g. RemoteDisconnected: relays under load/WAF pressure close
+                # the connection without any response. Nothing has been sent to
+                # Codex yet, so the request is safe to retry.
+                last_error = exc
+        if response is None:
+            _append_error(errors, f"/chat/completions → {last_error} (3 attempts)")
             return False
 
         content_type = (response.headers.get("Content-Type") or "").lower()

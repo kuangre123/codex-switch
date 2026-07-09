@@ -646,6 +646,34 @@ class CodexSwitchTests(unittest.TestCase):
         # Chat-style usage keys are normalized to Responses keys.
         self.assertIn('"input_tokens": 3', stream)
 
+    def test_chat_relay_retries_after_connection_dropped_without_response(self) -> None:
+        import http.client
+        handler = self._make_adapter_handler()
+        sse_body = (
+            b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        attempts = 0
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            return self._FakeUpstreamResponse(sse_body, "text/event-stream")
+
+        errors: list[str] = []
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen), \
+                mock.patch.object(cli_module.time, "sleep"):
+            handled = handler.relay_chat_stream({"input": []}, "https://relay.example", "glm-5.2", "sk-x", "resp_1", errors)
+
+        self.assertTrue(handled)
+        self.assertEqual(attempts, 2)
+        stream = handler.wfile.getvalue().decode("utf-8")
+        self.assertIn("response.output_text.delta", stream)
+        self.assertIn("response.completed", stream)
+
     def test_stream_failure_reports_upstream_diagnostics(self) -> None:
         cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         with tempfile.TemporaryDirectory() as temp:
