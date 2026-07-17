@@ -8,6 +8,7 @@ import copy
 import getpass
 import http.server
 import json
+import mmap
 import os
 import re
 import shutil
@@ -21,7 +22,6 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
-from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
@@ -43,18 +43,12 @@ UPSTREAM_USER_AGENT = "CodexSwitch/1.0"
 CONFIG_KEYS = ("local_base_url", "local_model", "local_upstream_model", "official_model")
 CUSTOM_PROVIDER_ID = "custom"
 MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
+MESSAGE_ID_REPAIR_VERSION = 1
+MESSAGE_ID_REPAIR_STATE_KEY = "message_id_repair_version"
 
 
 class SwitchError(RuntimeError):
     pass
-
-
-@dataclass
-class RolloutSyncInfo:
-    changed: bool = False
-    thread_id: str | None = None
-    cwd: str | None = None
-    has_user_event: bool = False
 
 
 def codex_home() -> Path:
@@ -675,123 +669,112 @@ def rollout_files(home: Path) -> list[Path]:
     return sorted(files)
 
 
-def rewrite_rollout_provider(path: Path, provider: str, model: str) -> RolloutSyncInfo:
-    info = RolloutSyncInfo()
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return info
-    info.has_user_event = '\"user_message\"' in text or '\"user_input\"' in text
-    output: list[str] = []
-    for segment in text.splitlines(keepends=True):
-        line = segment[:-1] if segment.endswith("\n") else segment
-        ending = "\n" if segment.endswith("\n") else ""
-        if line.endswith("\r"):
-            line = line[:-1]
-            ending = "\r\n"
-        next_line = line
+def repair_legacy_message_ids(home: Path) -> tuple[int, int, Path | None]:
+    """Repair message IDs emitted by Codex Switch versions before 0.7.13.
+
+    The chat-stream bridge accidentally used ``item_`` for assistant messages.
+    Codex persists those IDs in rollout files and later includes them when a
+    conversation is resumed. Native Responses endpoints require message IDs to
+    start with ``msg_``, so switching that conversation to an official/native
+    provider fails before the model can answer.
+
+    Only the invalid ID prefix is changed; message content and conversation
+    metadata are left untouched. Every changed rollout is backed up first.
+    """
+    state = load_state(home)
+    if state.get(MESSAGE_ID_REPAIR_STATE_KEY) == MESSAGE_ID_REPAIR_VERSION:
+        return 0, 0, None
+
+    changed_files = 0
+    changed_ids = 0
+    backup_root: Path | None = None
+    scan_complete = True
+    for path in rollout_files(home):
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            output.append(segment)
+            if path.stat().st_size == 0:
+                continue
+            with path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                if (
+                    mapped.find(b'"item_') < 0
+                    or mapped.find(b'"response_item"') < 0
+                    or mapped.find(b'"message"') < 0
+                ):
+                    continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            scan_complete = False
             continue
-        if record.get("type") == "session_meta" and isinstance(record.get("payload"), dict):
-            payload = record["payload"]
-            if info.thread_id is None and isinstance(payload.get("id"), str):
-                info.thread_id = payload["id"]
-            if info.cwd is None and isinstance(payload.get("cwd"), str):
-                info.cwd = payload["cwd"]
-            changed = False
-            if payload.get("model_provider") != provider:
-                payload["model_provider"] = provider
-                changed = True
-            if payload.get("model") != model:
-                payload["model"] = model
-                changed = True
-            if changed:
+        # Most installations have hundreds of large rollouts but only a small
+        # number written by the affected adapter. The memory-mapped prefilter
+        # avoids decoding unaffected files, and the one-time migration marker
+        # skips all rollout I/O on subsequent switches.
+        output: list[str] = []
+        file_changes = 0
+        for segment in text.splitlines(keepends=True):
+            line = segment[:-1] if segment.endswith("\n") else segment
+            ending = "\n" if segment.endswith("\n") else ""
+            if line.endswith("\r"):
+                line = line[:-1]
+                ending = "\r\n"
+            next_line = line
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                output.append(segment)
+                continue
+            payload = record.get("payload")
+            if (
+                record.get("type") == "response_item"
+                and isinstance(payload, dict)
+                and payload.get("type") == "message"
+                and isinstance(payload.get("id"), str)
+                and payload["id"].startswith("item_")
+            ):
+                payload["id"] = "msg_" + payload["id"][len("item_"):]
                 next_line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-                info.changed = True
-        output.append(next_line + ending)
-    if info.changed:
+                file_changes += 1
+            output.append(next_line + ending)
+        if not file_changes:
+            continue
+        if backup_root is None:
+            backup_root = home / "backups_state" / "message-id-repair" / datetime.now().strftime("%Y%m%d-%H%M%S")
+            suffix = 1
+            while backup_root.exists():
+                backup_root = backup_root.with_name(f"{backup_root.name}-{suffix}")
+                suffix += 1
+        relative = path.relative_to(home)
+        backup_path = backup_root / relative
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup_path)
         original_stat = path.stat()
         atomic_write(path, "".join(output), stat.S_IMODE(original_stat.st_mode) or 0o600)
         os.utime(path, (original_stat.st_atime, original_stat.st_mtime))
-    return info
+        changed_files += 1
+        changed_ids += file_changes
+    if scan_complete:
+        state = load_state(home)
+        state[MESSAGE_ID_REPAIR_STATE_KEY] = MESSAGE_ID_REPAIR_VERSION
+        save_state(home, state)
+    return changed_files, changed_ids, backup_root
 
 
-def provider_sync_backup(home: Path) -> Path:
-    backup_dir = home / "backups_state" / "provider-sync" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("config.toml", ".codex-global-state.json"):
-        source = home / name
-        if source.exists():
-            shutil.copy2(source, backup_dir / name)
-    return backup_dir
+def repair_legacy_message_ids_and_report(home: Path) -> None:
+    repaired_files, repaired_ids, repair_backup = repair_legacy_message_ids(home)
+    if repaired_ids:
+        print(f"Repaired {repaired_ids} legacy message ID(s) in {repaired_files} conversation file(s).")
+        print(f"message_id_backup: {repair_backup}")
 
 
 def sqlite_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
-def sync_sqlite_provider(home: Path, provider: str, model: str, rollouts: list[RolloutSyncInfo]) -> int:
-    databases = list((home / "sqlite").glob("state_*.sqlite"))
-    databases.extend(home.glob("state_*.sqlite"))
-    updated = 0
-    user_event_thread_ids = {info.thread_id for info in rollouts if info.thread_id and info.has_user_event}
-    cwd_by_thread_id = {info.thread_id: info.cwd for info in rollouts if info.thread_id and info.cwd}
-    for database in databases:
-        try:
-            connection = sqlite3.connect(database)
-            try:
-                columns = sqlite_columns(connection, "threads")
-                if "model_provider" not in columns:
-                    continue
-                cursor = connection.execute(
-                    "UPDATE threads SET model_provider = ? WHERE COALESCE(model_provider, '') <> ?",
-                    (provider, provider),
-                )
-                updated += cursor.rowcount if cursor.rowcount is not None else 0
-                if "model" in columns:
-                    cursor = connection.execute(
-                        "UPDATE threads SET model = ? WHERE COALESCE(model, '') <> ?",
-                        (model, model),
-                    )
-                    updated += cursor.rowcount if cursor.rowcount is not None else 0
-                if "has_user_event" in columns:
-                    for thread_id in user_event_thread_ids:
-                        cursor = connection.execute(
-                            "UPDATE threads SET has_user_event = 1 WHERE id = ? AND COALESCE(has_user_event, 0) <> 1",
-                            (thread_id,),
-                        )
-                        updated += cursor.rowcount if cursor.rowcount is not None else 0
-                if "cwd" in columns:
-                    for thread_id, cwd in cwd_by_thread_id.items():
-                        cursor = connection.execute(
-                            "UPDATE threads SET cwd = ? WHERE id = ? AND COALESCE(cwd, '') <> ?",
-                            (cwd, thread_id, cwd),
-                        )
-                        updated += cursor.rowcount if cursor.rowcount is not None else 0
-                connection.commit()
-            finally:
-                connection.close()
-        except sqlite3.Error as exc:
-            raise SwitchError(f"Could not sync thread provider/model in {database}: {exc}") from exc
-    return updated
-
-
-def sync_provider_metadata(home: Path, provider: str, model: str) -> tuple[int, int, Path]:
-    backup_dir = provider_sync_backup(home)
-    rollouts = [rewrite_rollout_provider(path, provider, model) for path in rollout_files(home)]
-    changed_rollouts = sum(1 for info in rollouts if info.changed)
-    sqlite_rows = sync_sqlite_provider(home, provider, model, rollouts)
-    return changed_rollouts, sqlite_rows, backup_dir
-
-
 def print_migration(home: Path, provider: str, model: str, args: argparse.Namespace) -> None:
     # Deliberately a no-op. Re-stamping every saved conversation's provider/model
     # destroyed conversation metadata and was based on a false premise (the
     # desktop app does not filter the conversation list by provider). Switching
-    # must never rewrite existing conversations. Kept for CLI compatibility
+    # must never rewrite existing conversations' provider/model metadata. Kept
+    # for CLI compatibility
     # (`--migrate-latest` is accepted but no longer mutates saved conversations).
     return
 
@@ -837,9 +820,53 @@ _SANITIZE_RETRY_CODES = {400, 415, 422}
 _RESPONSES_UNSUPPORTED_ROUTES: set[tuple[str, str]] = set()
 
 
+def normalize_responses_message_ids(payload: dict[str, object]) -> dict[str, object]:
+    """Return a request copy with legacy ``item_`` message IDs made valid.
+
+    This is the in-flight safety net for conversations already loaded by Codex;
+    the on-disk repair handles subsequent official-provider resumes.
+    """
+    normalized = dict(payload)
+    raw_input = payload.get("input")
+    if not isinstance(raw_input, list):
+        return normalized
+    normalized_input: list[object] = []
+    for raw_item in raw_input:
+        if not isinstance(raw_item, dict):
+            normalized_input.append(raw_item)
+            continue
+        item = dict(raw_item)
+        item_id = item.get("id")
+        if item.get("type") == "message" and isinstance(item_id, str) and item_id.startswith("item_"):
+            item["id"] = "msg_" + item_id[len("item_"):]
+        normalized_input.append(item)
+    normalized["input"] = normalized_input
+    return normalized
+
+
+def normalize_response_output_message_ids(payload: dict[str, object]) -> dict[str, object]:
+    """Normalize message IDs returned by Responses-compatible relays."""
+    normalized = dict(payload)
+    raw_output = payload.get("output")
+    if not isinstance(raw_output, list):
+        return normalized
+    output: list[object] = []
+    for raw_item in raw_output:
+        if not isinstance(raw_item, dict):
+            output.append(raw_item)
+            continue
+        item = dict(raw_item)
+        item_id = item.get("id")
+        if item.get("type") == "message" and isinstance(item_id, str) and item_id.startswith("item_"):
+            item["id"] = "msg_" + item_id[len("item_"):]
+        output.append(item)
+    normalized["output"] = output
+    return normalized
+
+
 def responses_passthrough_payloads(request: dict[str, object], upstream_model: str, stream: bool) -> list[dict[str, object]]:
     """Payload attempts for native /v1/responses passthrough, most complete first."""
-    base = dict(request)
+    base = normalize_responses_message_ids(request)
     base["model"] = upstream_model
     base["stream"] = stream
     attempts = [base]
@@ -1264,6 +1291,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(result, dict) or not isinstance(result.get("output"), list):
                 _append_error(errors, "/responses → JSON response has no output")
                 return None
+            result = normalize_response_output_message_ids(result)
             result["id"] = resp_id
             raw_usage = result.get("usage") or {}
             if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
@@ -1371,8 +1399,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
-        msg_id = f"msg_{uuid.uuid4().hex}"
-        item_id = f"item_{uuid.uuid4().hex}"
+        item_id = f"msg_{uuid.uuid4().hex}"
         self.write_sse("response.created", {
             "type": "response.created",
             "response": {
@@ -1635,6 +1662,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             _append_error(errors, f"/responses → JSON response has no output: {raw[:200]}")
             return False
         resp_id = str(result.get("id") or f"resp_{uuid.uuid4().hex}")
+        result = normalize_response_output_message_ids(result)
         result["id"] = resp_id
         raw_usage = result.get("usage") or {}
         if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
@@ -1702,6 +1730,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def write_response_stream(self, response_payload: dict[str, object]) -> None:
+        response_payload = normalize_response_output_message_ids(response_payload)
         output = response_payload.get("output")
         if isinstance(output, list):
             for index, item in enumerate(output):
@@ -1709,7 +1738,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     continue
                 in_progress = dict(item)
                 in_progress["status"] = "in_progress"
-                item_id = str(item.get("id") or f"item_{uuid.uuid4().hex}")
+                default_prefix = "msg" if item.get("type") == "message" else "item"
+                item_id = str(item.get("id") or f"{default_prefix}_{uuid.uuid4().hex}")
                 in_progress["id"] = item_id
                 self.write_sse("response.output_item.added", {"type": "response.output_item.added", "output_index": index, "item": in_progress})
                 if item.get("type") == "message":
@@ -1731,7 +1761,9 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     if arguments:
                         self.write_sse("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "output_index": index, "item_id": item_id, "delta": arguments})
                     self.write_sse("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "output_index": index, "item_id": item_id, "arguments": arguments})
-                self.write_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": index, "item": item})
+                completed_item = dict(item)
+                completed_item["id"] = item_id
+                self.write_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": index, "item": completed_item})
         self.write_sse("response.completed", {"type": "response.completed", "response": response_payload})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
@@ -1811,9 +1843,9 @@ def start_adapter_launch_agent(home: Path) -> Path:
     return path
 
 
-def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, expected_model: str) -> None:
+def stop_codex_before_switch(args: argparse.Namespace) -> bool:
     if not getattr(args, "restart_codex", False):
-        return
+        return False
     subprocess.run(
         ["osascript", "-e", 'tell application "Codex" to quit'],
         check=False,
@@ -1832,16 +1864,34 @@ def restart_codex(args: argparse.Namespace, home: Path, expected_provider: str, 
             stderr=subprocess.DEVNULL,
         )
         if probe.returncode != 0:
-            break
+            return True
         time.sleep(0.5)
+    raise SwitchError("Codex did not quit within 15 seconds; configuration was not changed. Please close Codex and retry.")
+
+
+def restart_codex(
+    args: argparse.Namespace,
+    home: Path,
+    expected_provider: str,
+    expected_model: str,
+    already_stopped: bool = False,
+) -> None:
+    if not getattr(args, "restart_codex", False):
+        return
+    if not already_stopped:
+        stop_codex_before_switch(args)
+    # Repair after Codex has flushed and closed its rollout files. The repair is
+    # intentionally narrow and backed up; doing it here avoids racing a live
+    # desktop process during a normal app-driven switch.
+    repair_legacy_message_ids_and_report(home)
     # NOTE: We intentionally do NOT rewrite existing conversations' provider or
     # model here. The desktop app does not filter the conversation list by
     # model_provider (verified: custom-tagged threads stay visible and openable
     # while the active provider is openai), so the previous blanket re-tagging
     # was both unnecessary and destructive -- it overwrote every conversation's
     # real model, which is the opposite of this app's whole purpose (keep your
-    # conversations intact across switches). Switching only changes the active
-    # provider/model in config.toml; saved conversations keep their own metadata.
+    # conversations intact across switches). Apart from the targeted legacy-ID
+    # repair above, saved conversations keep their content and own metadata.
     launched = None
     for attempt in range(3):
         if attempt:
@@ -1893,6 +1943,7 @@ def switch_local(args: argparse.Namespace) -> int:
     if not api_key:
         raise SwitchError("No API key found. Re-run with --api-key, or login once with `codex login --with-api-key`.")
     state["local_api_key"] = api_key
+    codex_stopped = stop_codex_before_switch(args)
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
@@ -1907,11 +1958,14 @@ def switch_local(args: argparse.Namespace) -> int:
     if restored_login:
         print("Restored the stashed ChatGPT login; no re-login needed.")
     # Never write a custom model_catalog_json (see configure_codex). Switching
-    # only changes config.toml; conversations are never touched.
+    # never retags conversations; the one-time legacy-ID repair is handled
+    # separately and leaves their content/metadata intact.
     if catalog_path.exists():
         catalog_path.unlink()
     config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, None)
     atomic_write(config_path, config, 0o600)
+    if not getattr(args, "restart_codex", False):
+        repair_legacy_message_ids_and_report(home)
 
     print("Switched Codex to local relay API mode.")
     print(f"codex_home: {home}")
@@ -1921,7 +1975,7 @@ def switch_local(args: argparse.Namespace) -> int:
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
     print_migration(home, "custom", model, args)
-    restart_codex(args, home, "custom", model)
+    restart_codex(args, home, "custom", model, already_stopped=codex_stopped)
     return 0
 
 
@@ -1937,6 +1991,7 @@ def switch_official(args: argparse.Namespace) -> int:
     model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
     auth["auth_mode"] = "chatgpt"
     restored_login = restore_login_tokens(auth, state)
+    codex_stopped = stop_codex_before_switch(args)
 
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
@@ -1948,6 +2003,8 @@ def switch_official(args: argparse.Namespace) -> int:
         print("Restored the stashed ChatGPT login; no re-login needed.")
     config = rewrite_config_for_official(read_config(config_path), model)
     atomic_write(config_path, config, 0o600)
+    if not getattr(args, "restart_codex", False):
+        repair_legacy_message_ids_and_report(home)
 
     print("Switched Codex to official ChatGPT login mode.")
     print(f"codex_home: {home}")
@@ -1957,7 +2014,7 @@ def switch_official(args: argparse.Namespace) -> int:
     print(f"backup_dir: {backup_dir}")
     print("Existing ChatGPT login tokens, custom API key, and custom model catalog were preserved.")
     print_migration(home, "openai", model, args)
-    restart_codex(args, home, "openai", model)
+    restart_codex(args, home, "openai", model, already_stopped=codex_stopped)
     return 0
 
 
@@ -2012,6 +2069,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         else:
             print(f"probe_ok: {protocol}")
 
+    codex_stopped = stop_codex_before_switch(args)
     backup_file(auth_path, backup_dir)
     backup_file(config_path, backup_dir)
     backup_file(catalog_path, backup_dir)
@@ -2052,8 +2110,8 @@ def configure_codex(args: argparse.Namespace) -> int:
     # cc-switch lesson: never write a custom model_catalog_json. It REPLACES
     # Codex's built-in catalog (shrinking the official model list and breaking
     # model resolution), and a single malformed catalog makes Codex fail to load
-    # config -> the conversation list disappears. Switching must only change the
-    # active provider/model in config.toml; conversations are never touched.
+    # config -> the conversation list disappears. Switching must not retag saved
+    # conversations; only the one-time legacy message-ID repair may edit rollouts.
     if catalog_path.exists():
         catalog_path.unlink()
     adapter_plist = start_adapter_launch_agent(home)
@@ -2068,6 +2126,8 @@ def configure_codex(args: argparse.Namespace) -> int:
         skip_login,
     )
     atomic_write(config_path, config, 0o600)
+    if not getattr(args, "restart_codex", False):
+        repair_legacy_message_ids_and_report(home)
 
     print("Configured Codex official and custom providers in parallel.")
     print(f"codex_home: {home}")
@@ -2082,12 +2142,8 @@ def configure_codex(args: argparse.Namespace) -> int:
     print("model_catalog_json: (built-in)")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
-    selected_provider = "openai" if default_provider == "openai" else CUSTOM_PROVIDER_ID
     selected_model = official_model if default_provider == "openai" else custom_model
-    changed_rollouts, sqlite_rows, sync_backup = sync_provider_metadata(home, selected_provider, selected_model)
-    if changed_rollouts or sqlite_rows:
-        print(f"Synced {changed_rollouts} rollout(s) and {sqlite_rows} thread(s) to {selected_provider}/{selected_model}.")
-    restart_codex(args, home, default_provider, selected_model)
+    restart_codex(args, home, default_provider, selected_model, already_stopped=codex_stopped)
     return 0
 
 

@@ -2,7 +2,7 @@
 
 > 一个小巧的 macOS 工具：一键把 Codex 在「官方 OpenAI」和「你自己的自定义 / 第三方 API」之间切换，**切换后对话记录始终都在**。
 
-Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 的事变成一次点击：官方 OpenAI 和你的自定义 provider 同时保留在配置里，切换只改「默认走哪一路」，**不碰任何对话数据**。内置国内主流大模型快速预设，并能在本地启动适配器把只支持 Chat Completions 的接口桥接成 Codex 需要的 Responses 协议。
+Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 的事变成一次点击：官方 OpenAI 和你的自定义 provider 同时保留在配置里，切换只改「默认走哪一路」，不会重写已保存对话的 provider/model 归属。内置国内主流大模型快速预设，并能在本地启动适配器把只支持 Chat Completions 的接口桥接成 Codex 需要的 Responses 协议。
 
 > ⚠️ 不要在对话里让 Codex 自己改接入方式，容易改坏。切换请用本工具，稳定得多。
 
@@ -24,7 +24,7 @@ Codex-Switch-vX.Y.Z-macOS.zip
 ## 功能
 
 - **官方 / 自定义并行**：两套配置都留在 `config.toml`，在 App 里选「API 提供方」再保存即可切换（桌面端和 CLI 通用）。
-- **对话永不丢**：切换只改写 `config.toml` 和 `auth.json`，绝不触碰会话数据库或 rollout，所以来回切历史对话都还在。
+- **对话永不丢**：正常切换只改写 `config.toml` 和 `auth.json`；若检测到旧版适配器留下的非法 message ID，则先备份、再一次性修复 ID 前缀，历史内容与会话归属保持不变。
 - **国内大模型快速预设**：DeepSeek、Kimi、智谱 GLM、通义千问、豆包（火山引擎）、百度文心、MiniMax、阶跃星辰 StepFun，以及「第三方 / 中转 API（手动填写）」——选完自动填好接入点和模型，只需粘贴 Key。
 - **自定义 / 第三方供应商卡片**：支持任意 OpenAI 兼容的第三方 / 中转 API。
 - **Chat 适配器**：接口只支持 `/chat/completions` 时，本地起代理自动把 Responses 转成 Chat Completions；原生 `/responses` 则直连。
@@ -65,7 +65,7 @@ codex-switch configure \
 ~/.codex/codex-switch-adapter.py
 ```
 
-不会触碰 `~/.codex/sessions`、rollout 或会话数据库 —— 对话安全。
+不会改写会话数据库或会话内容。仅在检测到旧版适配器生成的 `item_...` message ID 时修复为协议要求的 `msg_...`，原文件备份在 `~/.codex/backups_state/message-id-repair/`。
 
 ## 作者
 

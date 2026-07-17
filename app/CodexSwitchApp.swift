@@ -704,7 +704,9 @@ struct ContentView: View {
                 ? texts.text("已切换 Claude Code 到自定义 API。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to the custom API. Restart Claude Code terminal sessions to apply it.")
                 : texts.text("已切换 Claude Code 到官方 Claude。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to Official Claude. Restart Claude Code terminal sessions to apply it.")
         }
-        return texts.text("已保存官方 OpenAI 和自定义 API 的并行配置，并已重启 Codex。请在 Codex 的模型选择器里选择需要的模型。", "Saved the parallel Official OpenAI and custom API setup, then restarted Codex. Choose the model in Codex's model picker.")
+        return model.completedMode == .custom
+            ? texts.text("已切换到自定义 API 并重启 Codex，现有对话可直接继续。", "Switched to the custom API and restarted Codex. Existing conversations can continue.")
+            : texts.text("已切换到官方 OpenAI 并重启 Codex，现有对话可直接继续。", "Switched to Official OpenAI and restarted Codex. Existing conversations can continue.")
     }
 
     private var apiKeyPlaceholder: String {

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -220,6 +220,74 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertNotIn("sk-test-secret", result.stdout)
             self.assertEqual(read_state(home)["local_api_key"], "sk-test-secret")
 
+    def test_official_switch_repairs_legacy_adapter_message_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)
+            rollout = write_rollout(home, "legacy-custom", "custom")
+            with rollout.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "id": "item_from_old_adapter",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "answer"}],
+                            },
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(home, "official")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Repaired 1 legacy message ID(s)", result.stdout)
+            records = [json.loads(line) for line in rollout.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(records[1]["payload"]["id"], "msg_from_old_adapter")
+            backups = list((home / "backups_state" / "message-id-repair").rglob(rollout.name))
+            self.assertEqual(len(backups), 1)
+
+    def test_official_switch_stops_codex_before_rewriting_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(model=None, restart_codex=True, migrate_latest=False)
+            events: list[str] = []
+
+            def fake_run(cmd, **kwargs):
+                if cmd[0] == "osascript":
+                    events.append("quit")
+                    self.assertEqual(cli_module.configured_provider(cli_module.read_config(home / "config.toml")), "custom")
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[0] == "pgrep":
+                    events.append("stopped")
+                    return SimpleNamespace(returncode=1, stdout="", stderr="")
+                if cmd[0] == "open":
+                    events.append("open")
+                    self.assertEqual(cli_module.configured_provider(cli_module.read_config(home / "config.toml")), "openai")
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module, "codex_home", return_value=home), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(cli_module.time, "sleep"), \
+                    redirect_stdout(io.StringIO()):
+                cli_module.switch_official(args)
+
+            self.assertEqual(events, ["quit", "stopped", "open"])
+
     def test_local_switch_reuses_cached_api_key_after_official_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -395,6 +463,40 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertNotIn('model_catalog_json', config)
             self.assertFalse((home / "codex-switch-model-catalog.json").exists())
 
+    def test_configure_codex_does_not_retag_existing_conversations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            write_thread_database(home)
+            rollout = write_rollout(home, "latest-official", "openai", model="gpt-5.5")
+            (home / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"}),
+                encoding="utf-8",
+            )
+
+            result = run_tool(
+                home,
+                "configure",
+                "--base-url",
+                "https://custom.example/v1",
+                "--custom-model",
+                "vendor/custom-model",
+                "--official-model",
+                "gpt-5.5",
+                "--default-provider",
+                "custom",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(meta["payload"]["model_provider"], "openai")
+            self.assertEqual(meta["payload"]["model"], "gpt-5.5")
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
+                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
+            self.assertEqual(providers, {"openai", "custom"})
+            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
+
     def test_custom_catalog_preserves_models_used_by_existing_threads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -559,6 +661,76 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertTrue(attempt["stream"])
             self.assertIn("tools", attempt)
 
+    def test_responses_passthrough_normalizes_legacy_message_ids(self) -> None:
+        request = {
+            "input": [
+                {
+                    "type": "message",
+                    "id": "item_legacy_assistant",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "item_function_call_is_not_a_message",
+                    "call_id": "call_1",
+                },
+            ],
+        }
+
+        attempts = cli_module.responses_passthrough_payloads(request, "gpt-5.5", True)
+
+        for attempt in attempts:
+            self.assertEqual(attempt["input"][0]["id"], "msg_legacy_assistant")
+            self.assertEqual(attempt["input"][1]["id"], "item_function_call_is_not_a_message")
+        # The adapter must not mutate the request object held by Codex.
+        self.assertEqual(request["input"][0]["id"], "item_legacy_assistant")
+
+    def test_repair_legacy_message_ids_is_targeted_backed_up_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            rollout = write_rollout(home, "legacy-id", "custom")
+            records = [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "item_bad_message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "kept"}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "id": "item_function_call",
+                        "call_id": "call_1",
+                    },
+                },
+            ]
+            with rollout.open("a", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+            changed_files, changed_ids, backup_root = cli_module.repair_legacy_message_ids(home)
+
+            self.assertEqual((changed_files, changed_ids), (1, 1))
+            self.assertIsNotNone(backup_root)
+            backup = backup_root / rollout.relative_to(home)
+            self.assertTrue(backup.exists())
+            self.assertIn('"id":"item_bad_message"', backup.read_text(encoding="utf-8"))
+            repaired = [json.loads(line) for line in rollout.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(repaired[1]["payload"]["id"], "msg_bad_message")
+            self.assertEqual(repaired[1]["payload"]["content"][0]["text"], "kept")
+            self.assertEqual(repaired[2]["payload"]["id"], "item_function_call")
+            self.assertEqual(
+                read_state(home)[cli_module.MESSAGE_ID_REPAIR_STATE_KEY],
+                cli_module.MESSAGE_ID_REPAIR_VERSION,
+            )
+
+            self.assertEqual(cli_module.repair_legacy_message_ids(home), (0, 0, None))
+
     def test_responses_relay_remembers_unsupported_route(self) -> None:
         cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         handler = self._make_adapter_handler()
@@ -673,6 +845,18 @@ class CodexSwitchTests(unittest.TestCase):
         stream = handler.wfile.getvalue().decode("utf-8")
         self.assertIn("response.output_text.delta", stream)
         self.assertIn("response.completed", stream)
+        event_payloads = [
+            json.loads(line[len("data: "):])
+            for line in stream.splitlines()
+            if line.startswith("data: {")
+        ]
+        message_ids = [
+            payload["item"]["id"]
+            for payload in event_payloads
+            if isinstance(payload.get("item"), dict) and payload["item"].get("type") == "message"
+        ]
+        self.assertTrue(message_ids)
+        self.assertTrue(all(item_id.startswith("msg_") for item_id in message_ids))
 
     def test_chat_relay_body_cap_rejection_skips_retries_and_hints_compact(self) -> None:
         handler = self._make_adapter_handler()
@@ -1257,15 +1441,17 @@ class CodexSwitchTests(unittest.TestCase):
 
     def test_restart_does_not_retag_conversations(self) -> None:
         # Verified empirically: the desktop does NOT filter the conversation list
-        # by model_provider, so restart must leave saved conversations untouched.
+        # by model_provider, so restart must leave valid conversation metadata untouched.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_local_config(home)  # model_provider = "custom"
             write_thread_database(home)
             args = SimpleNamespace(restart_codex=True, migrate_latest=False)
 
-            run_ok = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
-            with mock.patch.object(cli_module.subprocess, "run", run_ok), mock.patch.object(cli_module.time, "sleep"):
+            def run_ok(cmd, **kwargs):
+                return SimpleNamespace(returncode=1 if cmd[0] == "pgrep" else 0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module.subprocess, "run", side_effect=run_ok), mock.patch.object(cli_module.time, "sleep"):
                 cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
@@ -1298,7 +1484,6 @@ class CodexSwitchTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run) as run_mock, \
                     mock.patch.object(cli_module.time, "sleep"):
-                from contextlib import redirect_stdout
                 with redirect_stdout(captured):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
@@ -1318,12 +1503,14 @@ class CodexSwitchTests(unittest.TestCase):
             rollout = write_rollout(home, "current-custom", "custom")
             args = SimpleNamespace(restart_codex=True, migrate_latest=True)
 
-            run_ok = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
-            with mock.patch.object(cli_module.subprocess, "run", run_ok), mock.patch.object(cli_module.time, "sleep"):
+            def run_ok(cmd, **kwargs):
+                return SimpleNamespace(returncode=1 if cmd[0] == "pgrep" else 0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module.subprocess, "run", side_effect=run_ok), mock.patch.object(cli_module.time, "sleep"):
                 with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider/model openai/gpt-5, not custom/gpt-5.5"):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
-            # Even on mismatch, conversations are never rewritten.
+            # Even on mismatch, conversation provider/model metadata is never rewritten.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "custom")
             self.assertEqual(meta["payload"]["model"], "codex-switch/gpt-5.5")

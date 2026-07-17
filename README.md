@@ -4,9 +4,9 @@
 >
 > A tiny macOS app to switch Codex between Official OpenAI and your own custom / third‑party API — **without ever losing your conversations**.
 
-Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 的事变成一次点击：官方 OpenAI 和你的自定义 provider 同时保留在配置里，切换只改「默认走哪一路」，**不碰任何对话数据**。它内置了国内主流大模型的快速预设，并能在本地启动一个适配器，把只支持 Chat Completions 的接口自动桥接成 Codex 需要的 Responses 协议。
+Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 的事变成一次点击：官方 OpenAI 和你的自定义 provider 同时保留在配置里，切换只改「默认走哪一路」，不会重写已保存对话的 provider/model 归属。它内置了国内主流大模型的快速预设，并能在本地启动一个适配器，把只支持 Chat Completions 的接口自动桥接成 Codex 需要的 Responses 协议。
 
-It turns hand‑editing `~/.codex/auth.json` and `config.toml` into one save: Official OpenAI and your custom provider both stay configured, switching only changes the default route, and your saved conversations are never touched. It ships quick presets for popular Chinese LLM providers and can run a local adapter that bridges Chat‑Completions‑only APIs to the Responses protocol Codex speaks.
+It turns hand‑editing `~/.codex/auth.json` and `config.toml` into one save: Official OpenAI and your custom provider both stay configured, switching changes the default route without retagging saved conversations. It ships quick presets for popular Chinese LLM providers and can run a local adapter that bridges Chat‑Completions‑only APIs to the Responses protocol Codex speaks.
 
 > ⚠️ 不要在对话里让 Codex 自己改接入方式，容易改坏。切换请用本工具，稳定得多。
 > Don't ask Codex itself to edit its provider config in chat — use this app to switch, it's far more reliable.
@@ -31,7 +31,7 @@ The app is **signed with a Developer ID and notarized by Apple**, and is a **uni
 ## 功能 / Features
 
 - **官方 / 自定义并行**：两套配置都留在 `config.toml`，在 App 里选「API 提供方」再保存即可切换（桌面端和 CLI 通用）。
-- **对话永不丢**：切换只改写 `config.toml` 和 `auth.json`，**绝不触碰会话数据库或 rollout**，所以官方 / 自定义来回切，历史对话都还在。
+- **对话永不丢**：正常切换只改写 `config.toml` 和 `auth.json`；若检测到旧版适配器留下的非法 message ID，则先备份、再一次性修复 ID 前缀，历史内容与会话归属保持不变。
 - **国内大模型快速预设**：DeepSeek、Kimi、智谱 GLM、通义千问、豆包（火山引擎）、百度文心、MiniMax、阶跃星辰 StepFun，以及「第三方 / 中转 API（手动填写）」——选完自动填好接入点和模型，只需粘贴 API Key。
 - **自定义 / 第三方供应商卡片**：支持任意 OpenAI 兼容的第三方 / 中转 API，填接入点 + 模型 ID + Key 即可。
 - **Chat 适配器**：接口只支持 `/chat/completions`（如 DeepSeek/Kimi/千问等）时，在本地启动一个代理，自动把 Codex 的 Responses 请求转成 Chat Completions；原生支持 `/responses` 的接口则直连。
@@ -82,7 +82,7 @@ codex-switch configure \
 ~/.codex/codex-switch-adapter.py    # Chat 适配器脚本（稳定副本）
 ```
 
-**不会**触碰 `~/.codex/sessions`、rollout 文件或会话数据库 —— 你的对话安全。
+不会改写会话数据库或会话内容。仅在检测到旧版适配器生成的 `item_...` message ID 时修复为协议要求的 `msg_...`，原文件备份在 `~/.codex/backups_state/message-id-repair/`。
 
 ## 从源码构建 / Build from source
 
