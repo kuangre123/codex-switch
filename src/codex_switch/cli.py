@@ -1843,6 +1843,64 @@ def start_adapter_launch_agent(home: Path) -> Path:
     return path
 
 
+def thread_database_paths(home: Path) -> list[Path]:
+    # The merged ChatGPT.app desktop (2026-07) keeps the live thread DB at
+    # ~/.codex/state_5.sqlite; older standalone Codex builds used
+    # ~/.codex/sqlite/state_5.sqlite. Update every copy that exists so
+    # whichever one the installed app reads stays in sync.
+    candidates = (home / "state_5.sqlite", home / "sqlite" / "state_5.sqlite")
+    return [path for path in candidates if path.exists()]
+
+
+def backup_sqlite_database(db_path: Path, backup_dir: Path) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    target = backup_dir / db_path.name
+    source = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        destination = sqlite3.connect(str(target))
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+    finally:
+        source.close()
+    return target
+
+
+def sync_thread_provider_tags(home: Path, provider: str) -> int:
+    """Keep conversations visible in the merged ChatGPT.app after a switch.
+
+    That app filters the conversation sidebar by model_provider (verified
+    2026-07: with the custom provider active every openai-tagged conversation
+    vanishes from the list, and vice versa), so retag the sqlite rows to the
+    newly selected provider. ONLY the provider column changes: the model
+    column keeps recording which model each conversation really used, and
+    rollout files are never touched — rewriting them is what corrupted
+    message IDs before 0.7.13. Databases are backed up first, and failures
+    never abort the switch.
+    """
+    updated = 0
+    for db_path in thread_database_paths(home):
+        try:
+            backup_sqlite_database(
+                db_path,
+                home / "backups_state" / "provider-tag" / datetime.now().strftime("%Y%m%d-%H%M%S"),
+            )
+            connection = sqlite3.connect(str(db_path), timeout=5)
+            try:
+                with connection:
+                    cursor = connection.execute(
+                        "UPDATE threads SET model_provider = ? WHERE model_provider != ?",
+                        (provider, provider),
+                    )
+                    updated += cursor.rowcount
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            print(f"provider_tag_warn: {db_path}: {exc}")
+    return updated
+
+
 def stop_codex_before_switch(args: argparse.Namespace) -> bool:
     if not getattr(args, "restart_codex", False):
         return False
@@ -1884,14 +1942,15 @@ def restart_codex(
     # intentionally narrow and backed up; doing it here avoids racing a live
     # desktop process during a normal app-driven switch.
     repair_legacy_message_ids_and_report(home)
-    # NOTE: We intentionally do NOT rewrite existing conversations' provider or
-    # model here. The desktop app does not filter the conversation list by
-    # model_provider (verified: custom-tagged threads stay visible and openable
-    # while the active provider is openai), so the previous blanket re-tagging
-    # was both unnecessary and destructive -- it overwrote every conversation's
-    # real model, which is the opposite of this app's whole purpose (keep your
-    # conversations intact across switches). Apart from the targeted legacy-ID
-    # repair above, saved conversations keep their content and own metadata.
+    # The merged ChatGPT.app filters the conversation sidebar by
+    # model_provider (unlike the old standalone desktop), so retag the sqlite
+    # rows to the newly selected provider while Codex is stopped — otherwise
+    # the whole history vanishes from the list after a switch. Only the
+    # provider column changes; conversation content, per-thread models, and
+    # rollout files stay untouched (see sync_thread_provider_tags).
+    tagged = sync_thread_provider_tags(home, expected_provider)
+    if tagged:
+        print(f"Tagged {tagged} conversation(s) to {expected_provider} so they stay listed.")
     launched = None
     for attempt in range(3):
         if attempt:

@@ -1439,9 +1439,10 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Restarted Codex.app", result.stdout)
 
-    def test_restart_does_not_retag_conversations(self) -> None:
-        # Verified empirically: the desktop does NOT filter the conversation list
-        # by model_provider, so restart must leave valid conversation metadata untouched.
+    def test_restart_retags_thread_providers_but_keeps_models(self) -> None:
+        # The merged ChatGPT.app filters the sidebar by model_provider, so a
+        # restart-driven switch must retag rows to the selected provider —
+        # while leaving each conversation's real model untouched.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_local_config(home)  # model_provider = "custom"
@@ -1457,9 +1458,35 @@ class CodexSwitchTests(unittest.TestCase):
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
                 models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            # Threads keep their original provider/model.
-            self.assertEqual(providers, {"openai", "custom"})
+            self.assertEqual(providers, {"custom"})
             self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
+
+    def test_sync_thread_provider_tags_updates_all_databases_and_backs_up(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_thread_database(home)  # legacy ~/.codex/sqlite/state_5.sqlite
+            # Merged-app layout: live DB directly under ~/.codex.
+            root_db = home / "state_5.sqlite"
+            with closing(sqlite3.connect(root_db)) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT)")
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    [("t1", "openai", "gpt-5.6-sol"), ("t2", "openai", "gpt-5.5"), ("t3", "custom", "glm-5.2")],
+                )
+                connection.commit()
+
+            updated = cli_module.sync_thread_provider_tags(home, "custom")
+
+            self.assertEqual(updated, 2 + 3)  # root: t1,t2; legacy DB: 3 openai rows
+            with closing(sqlite3.connect(root_db)) as connection:
+                rows = list(connection.execute("SELECT model_provider, model FROM threads ORDER BY id"))
+            self.assertEqual(rows, [("custom", "gpt-5.6-sol"), ("custom", "gpt-5.5"), ("custom", "glm-5.2")])
+            backups = list((home / "backups_state" / "provider-tag").rglob("state_5.sqlite"))
+            self.assertTrue(backups)
+            # Missing databases are tolerated.
+            empty_home = Path(temp) / "empty"
+            empty_home.mkdir()
+            self.assertEqual(cli_module.sync_thread_provider_tags(empty_home, "openai"), 0)
 
     def test_restart_launch_failure_warns_instead_of_failing(self) -> None:
         # LaunchServices can refuse to relaunch (-609) while the old process is
@@ -1495,7 +1522,7 @@ class CodexSwitchTests(unittest.TestCase):
             open_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "open"]
             self.assertEqual(len(open_calls), 3)
 
-    def test_restart_does_not_touch_conversations_on_provider_mismatch(self) -> None:
+    def test_restart_keeps_rollouts_untouched_on_provider_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
@@ -1510,13 +1537,16 @@ class CodexSwitchTests(unittest.TestCase):
                 with self.assertRaisesRegex(cli_module.SwitchError, "restarted with provider/model openai/gpt-5, not custom/gpt-5.5"):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
-            # Even on mismatch, conversation provider/model metadata is never rewritten.
+            # Rollout files are never rewritten, even on mismatch; the sqlite
+            # provider tag was already applied for the intended provider.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "custom")
             self.assertEqual(meta["payload"]["model"], "codex-switch/gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
                 providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
-            self.assertEqual(providers, {"openai", "custom"})
+                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
+            self.assertEqual(providers, {"custom"})
+            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
 
 
 if __name__ == "__main__":
