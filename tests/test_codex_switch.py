@@ -149,6 +149,39 @@ def write_rollout(home: Path, thread_id: str, provider: str, user_event: bool = 
     return path
 
 
+class CodexHomeResolutionTests(unittest.TestCase):
+    def test_codex_home_falls_back_to_real_home_under_translocation(self) -> None:
+        # App Translocation redirects $HOME to a temp dir; the adapter must still
+        # find the real ~/.codex (with the user's credentials), not the throwaway.
+        env = dict(cli_module.os.environ)
+        env.pop("CODEX_HOME", None)
+        with mock.patch.dict(cli_module.os.environ, env, clear=True), \
+                mock.patch.object(cli_module.Path, "home", return_value=Path("/var/folders/ab/T/tmpXYZ")), \
+                mock.patch.object(cli_module, "_real_user_home", return_value=Path("/Users/realuser")):
+            self.assertEqual(cli_module.codex_home(), Path("/Users/realuser/.codex"))
+            self.assertEqual(cli_module.claude_home(), Path("/Users/realuser/.claude"))
+
+    def test_codex_home_respects_explicit_env_even_when_temp(self) -> None:
+        # The test suite itself points CODEX_HOME at /var/folders temp dirs, so an
+        # explicit override must never be second-guessed by the translocation guard.
+        with mock.patch.dict(cli_module.os.environ, {"CODEX_HOME": "/var/folders/ab/T/tmpXYZ/.codex"}):
+            self.assertEqual(cli_module.codex_home(), Path("/var/folders/ab/T/tmpXYZ/.codex"))
+
+    def test_codex_home_normal_home_is_unchanged(self) -> None:
+        env = dict(cli_module.os.environ)
+        env.pop("CODEX_HOME", None)
+        with mock.patch.dict(cli_module.os.environ, env, clear=True), \
+                mock.patch.object(cli_module.Path, "home", return_value=Path("/Users/normal")):
+            self.assertEqual(cli_module.codex_home(), Path("/Users/normal/.codex"))
+
+    def test_resolved_home_keeps_temp_when_real_home_also_looks_temp(self) -> None:
+        # Degenerate case (real home lookup also returns a temp path): keep $HOME
+        # rather than swapping in an equally-bad path.
+        with mock.patch.object(cli_module.Path, "home", return_value=Path("/var/folders/ab/T/tmpXYZ")), \
+                mock.patch.object(cli_module, "_real_user_home", return_value=Path("/var/folders/zz/T/tmpQQQ")):
+            self.assertEqual(cli_module._resolved_home(), Path("/var/folders/ab/T/tmpXYZ"))
+
+
 class CodexSwitchTests(unittest.TestCase):
     def test_local_switch_preserves_unrelated_config_and_stores_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

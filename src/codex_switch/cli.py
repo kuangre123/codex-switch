@@ -56,12 +56,50 @@ class SwitchError(RuntimeError):
     pass
 
 
+def _looks_translocated(path: Path) -> bool:
+    # Under macOS App Translocation (running a quarantined app straight from a
+    # DMG/Downloads) or a sandbox, $HOME is redirected to a throwaway temp
+    # directory. A real home is never under /var/folders or an AppTranslocation
+    # path. ("/var/folders/" also matches the /private/var/folders/ variant.)
+    marker = str(path)
+    return "/AppTranslocation/" in marker or "/var/folders/" in marker
+
+
+def _real_user_home() -> Path:
+    """The account's real home from the user database, immune to $HOME
+    redirection under App Translocation / sandboxing."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        return Path.home()
+
+
+def _resolved_home() -> Path:
+    # Only override the default home when $HOME looks translocated; an explicit
+    # CODEX_HOME/CLAUDE_CONFIG_DIR (used by tests and power users) always wins
+    # and is handled by the callers before this is consulted.
+    home = Path.home()
+    if _looks_translocated(home):
+        real = _real_user_home()
+        if not _looks_translocated(real):
+            return real
+    return home
+
+
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env).expanduser()
+    return (_resolved_home() / ".codex").expanduser()
 
 
 def claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env:
+        return Path(env).expanduser()
+    return (_resolved_home() / ".claude").expanduser()
 
 
 def redacted_key(value: str | None) -> str:
