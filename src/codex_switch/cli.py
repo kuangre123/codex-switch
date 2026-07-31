@@ -11,6 +11,7 @@ import json
 import mmap
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
@@ -45,6 +47,9 @@ CUSTOM_PROVIDER_ID = "custom"
 MODEL_CATALOG_NAME = "codex-switch-model-catalog.json"
 MESSAGE_ID_REPAIR_VERSION = 1
 MESSAGE_ID_REPAIR_STATE_KEY = "message_id_repair_version"
+DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
+PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
 
 
 class SwitchError(RuntimeError):
@@ -335,6 +340,252 @@ def ensure_profile(
         lines.extend(f'{key} = "{value}"\n' for key, value in settings.items())
         updated.append((header, lines))
     return updated
+
+
+def normalize_proxy_url(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise SwitchError("proxy URL cannot be empty")
+    if "://" not in raw:
+        raw = "http://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "http":
+        raise SwitchError("proxy URL must use the HTTP proxy protocol, for example http://127.0.0.1:7897")
+    if not parsed.hostname or parsed.port is None:
+        raise SwitchError("proxy URL must include host and port, for example http://127.0.0.1:7897")
+    if parsed.username or parsed.password:
+        raise SwitchError("proxy URL must not include usernames, passwords, or tokens")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise SwitchError("proxy URL must only contain scheme, host and port")
+    return f"http://{parsed.hostname}:{parsed.port}"
+
+
+def proxy_launch_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+
+
+def clash_verge_config_candidates() -> list[Path]:
+    base = Path.home() / "Library" / "Application Support" / "io.github.clash-verge-rev.clash-verge-rev"
+    return [base / "clash-verge.yaml", base / "clash-verge-check.yaml", base / "config.yaml"]
+
+
+def detect_clash_verge_proxy_url() -> str | None:
+    ports: dict[str, int] = {}
+    for path in clash_verge_config_candidates():
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                match = re.match(r"^\s*(mixed-port|port)\s*:\s*([0-9]+)\s*(?:#.*)?$", line)
+                if match:
+                    ports.setdefault(match.group(1), int(match.group(2)))
+        except OSError:
+            continue
+    port = ports.get("mixed-port") or ports.get("port")
+    if port:
+        return f"http://127.0.0.1:{port}"
+    return None
+
+
+def find_toml_section(sections: list[tuple[str, list[str]]], header: str) -> tuple[int, list[str]] | None:
+    for index, (section, lines) in enumerate(sections):
+        if section == header:
+            return index, lines
+    return None
+
+
+def rewrite_config_for_proxy(content: str, proxy_url: str, no_proxy: str) -> str:
+    sections = split_toml_sections(content)
+    header = "[shell_environment_policy.set]"
+    found = find_toml_section(sections, header)
+    if found is None:
+        lines = ["\n" if sections and sections[-1][1] and sections[-1][1][-1].strip() else "", f"{header}\n"]
+        sections.append((header, lines))
+    else:
+        _, lines = found
+    for key in PROXY_ENV_KEYS:
+        lines = set_key(lines, key, proxy_url)
+    for key in NO_PROXY_ENV_KEYS:
+        lines = set_key(lines, key, no_proxy)
+    return "".join(line for _, section_lines in sections for line in section_lines)
+
+
+def rewrite_config_without_proxy(content: str) -> str:
+    sections = split_toml_sections(content)
+    header = "[shell_environment_policy.set]"
+    found = find_toml_section(sections, header)
+    if found is None:
+        return content
+    index, lines = found
+    for key in (*PROXY_ENV_KEYS, *NO_PROXY_ENV_KEYS):
+        lines = remove_key(lines, key)
+    sections[index] = (header, lines)
+    return "".join(line for _, section_lines in sections for line in section_lines)
+
+
+def toml_section_value(content: str, header: str, key: str) -> str | None:
+    for section, lines in split_toml_sections(content):
+        if section != header:
+            continue
+        for line in lines:
+            match = re.match(rf"^\s*{re.escape(key)}\s*=\s*\"([^\"]*)\"", line)
+            if match:
+                return match.group(1)
+    return None
+
+
+def shell_proxy_config_values(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key in (*PROXY_ENV_KEYS, *NO_PROXY_ENV_KEYS):
+        value = toml_section_value(content, "[shell_environment_policy.set]", key)
+        if value is not None:
+            values[key] = value
+    return values
+
+
+def launchctl_getenv(key: str) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    result = subprocess.run(["launchctl", "getenv", key], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def set_launchd_proxy(proxy_url: str, no_proxy: str) -> None:
+    if sys.platform != "darwin":
+        print("launchd_warn: launchctl setenv is only available on macOS; skipped.")
+        return
+    for key in PROXY_ENV_KEYS:
+        subprocess.run(["launchctl", "setenv", key, proxy_url], check=True)
+    for key in NO_PROXY_ENV_KEYS:
+        subprocess.run(["launchctl", "setenv", key, no_proxy], check=True)
+
+
+def unset_launchd_proxy() -> None:
+    if sys.platform != "darwin":
+        return
+    for key in (*PROXY_ENV_KEYS, *NO_PROXY_ENV_KEYS):
+        subprocess.run(["launchctl", "unsetenv", key], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def write_proxy_launch_agent(proxy_url: str, no_proxy: str) -> Path:
+    path = proxy_launch_agent_path()
+    commands = []
+    for key in PROXY_ENV_KEYS:
+        commands.append(f"launchctl setenv {shlex.quote(key)} {shlex.quote(proxy_url)}")
+    for key in NO_PROXY_ENV_KEYS:
+        commands.append(f"launchctl setenv {shlex.quote(key)} {shlex.quote(no_proxy)}")
+    command = "; ".join(commands)
+    content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kuangre.codex-switch.proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>{xml_escape(command)}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+'''
+    atomic_write(path, content, 0o644)
+    if sys.platform == "darwin":
+        subprocess.run(["launchctl", "bootout", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["launchctl", "bootstrap", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return path
+
+
+def remove_proxy_launch_agent() -> None:
+    path = proxy_launch_agent_path()
+    if sys.platform == "darwin":
+        subprocess.run(["launchctl", "bootout", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def probe_http_proxy(proxy_url: str, timeout: float = 12.0) -> tuple[bool, str]:
+    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    opener = urllib.request.build_opener(handler)
+    request = urllib.request.Request(
+        "https://www.gstatic.com/generate_204",
+        headers={"User-Agent": UPSTREAM_USER_AGENT},
+        method="HEAD",
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            code = int(response.status)
+        if 200 <= code < 400:
+            return True, f"HTTP {code}"
+        return False, f"HTTP {code}"
+    except urllib.error.HTTPError as exc:
+        if 200 <= int(exc.code) < 500:
+            return True, f"HTTP {exc.code}"
+        return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def activate_proxy_runtime(home: Path, proxy_url: str, no_proxy: str) -> None:
+    """Apply the proxy to launchd, the login LaunchAgent and config.toml."""
+    config_path = home / "config.toml"
+    set_launchd_proxy(proxy_url, no_proxy)
+    write_proxy_launch_agent(proxy_url, no_proxy)
+    backup_file(config_path, home / "backups")
+    atomic_write(config_path, rewrite_config_for_proxy(read_config(config_path), proxy_url, no_proxy), 0o600)
+
+
+def deactivate_proxy_runtime(home: Path) -> None:
+    """Remove the proxy from launchd, the LaunchAgent and config.toml. Only the
+    runtime is cleared; the caller decides what to do with the saved
+    preference (proxy_preference / proxy_url) so it can be reapplied later."""
+    config_path = home / "config.toml"
+    unset_launchd_proxy()
+    remove_proxy_launch_agent()
+    if shell_proxy_config_values(read_config(config_path)):
+        backup_file(config_path, home / "backups")
+        atomic_write(config_path, rewrite_config_without_proxy(read_config(config_path)), 0o600)
+
+
+def proxy_runtime_present(home: Path) -> bool:
+    return bool(shell_proxy_config_values(read_config(home / "config.toml"))) or launchctl_getenv("HTTP_PROXY") is not None
+
+
+def apply_proxy_for_provider(home: Path, provider: str, state: dict[str, object]) -> None:
+    """Keep the HTTP proxy scoped to official mode.
+
+    The custom API path is Codex -> local adapter (127.0.0.1) -> China-direct
+    relay; none of it should traverse a proxy, and Codex's HTTP client ignores
+    NO_PROXY, so a global proxy silently breaks the local adapter's streaming.
+    Switching to custom therefore deactivates the proxy runtime while keeping
+    the user's saved preference; switching to official reactivates it when the
+    user has one enabled. proxy_enabled tracks the *actual* runtime state (the
+    desktop reads it for its status badge); proxy_preference is the intent that
+    survives custom switches."""
+    wants_proxy = effective_setting(state, "proxy_preference", "false") == "true"
+    proxy_url = effective_setting(state, "proxy_url", "")
+    no_proxy = effective_setting(state, "proxy_no_proxy", DEFAULT_NO_PROXY)
+    if provider == "openai":
+        if wants_proxy and proxy_url:
+            activate_proxy_runtime(home, proxy_url, no_proxy)
+            state["proxy_enabled"] = "true"
+            save_state(home, state)
+            print(f"Re-enabled the HTTP proxy for official mode: {proxy_url}")
+        return
+    # Custom (or any non-official) provider: the proxy must not be active.
+    if proxy_runtime_present(home) or effective_setting(state, "proxy_enabled", "false") == "true":
+        deactivate_proxy_runtime(home)
+        state["proxy_enabled"] = "false"
+        save_state(home, state)
+        print("Disabled the HTTP proxy for custom API mode (it only applies to official mode).")
 
 
 def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path | None) -> str:
@@ -1978,6 +2229,145 @@ def restart_codex(
     print("Restarted Codex.app to reload the selected provider.")
 
 
+def restart_codex_after_proxy(args: argparse.Namespace) -> None:
+    if not getattr(args, "restart_codex", False):
+        return
+    stop_codex_before_switch(args)
+    launched = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2.0)
+        launched = subprocess.run(["open", "-a", "Codex"], check=False, capture_output=True, text=True)
+        if launched.returncode == 0:
+            break
+    if launched is None or launched.returncode != 0:
+        print("restart_warn: 代理配置已保存成功，但自动重启 Codex 失败，请手动打开 Codex.app。")
+        detail = ((launched.stderr or launched.stdout or "").strip() if launched is not None else "")
+        if detail:
+            print(detail)
+        return
+    time.sleep(RESTART_SETTLE_SECONDS)
+    print("Restarted Codex.app to reload proxy environment.")
+
+
+def resolve_proxy_url(args: argparse.Namespace, state: dict[str, object]) -> tuple[str, str]:
+    manual = getattr(args, "url", None)
+    if manual:
+        return normalize_proxy_url(manual), "manual"
+    if getattr(args, "auto", False):
+        detected = detect_clash_verge_proxy_url()
+        if not detected:
+            raise SwitchError("Could not detect a Clash Verge HTTP/mixed proxy port. Re-run with --url http://127.0.0.1:<port>.")
+        return normalize_proxy_url(detected), "clash-verge"
+    saved = state.get("proxy_url")
+    if isinstance(saved, str) and saved.strip():
+        return normalize_proxy_url(saved), "saved"
+    raise SwitchError("No proxy URL provided. Use `proxy set --url http://127.0.0.1:<port>` or `proxy apply --auto`.")
+
+
+def proxy_status(args: argparse.Namespace) -> int:
+    home = codex_home()
+    state = load_state(home)
+    config = read_config(home / "config.toml")
+    config_values = shell_proxy_config_values(config)
+    launch_agent = proxy_launch_agent_path()
+    print(f"codex_home: {home}")
+    print(f"proxy_enabled: {effective_setting(state, 'proxy_enabled', 'false')}")
+    print(f"proxy_preference: {effective_setting(state, 'proxy_preference', 'false')}")
+    print(f"proxy_url: {effective_setting(state, 'proxy_url', '(missing)')}")
+    print(f"proxy_no_proxy: {effective_setting(state, 'proxy_no_proxy', DEFAULT_NO_PROXY)}")
+    print(f"proxy_source: {effective_setting(state, 'proxy_source', '(missing)')}")
+    print(f"launch_agent: {launch_agent if launch_agent.exists() else '(missing)'}")
+    for key in (*PROXY_ENV_KEYS, *NO_PROXY_ENV_KEYS):
+        print(f"config.{key}: {config_values.get(key, '(missing)')}")
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        value = launchctl_getenv(key)
+        print(f"launchd.{key}: {value if value else '(missing)'}")
+    if getattr(args, "probe", False):
+        proxy_url, _ = resolve_proxy_url(args, state)
+        ok, detail = probe_http_proxy(proxy_url)
+        print(f"probe: {'ok' if ok else 'failed'} ({detail})")
+        if not ok:
+            return 1
+    return 0
+
+
+def proxy_apply(args: argparse.Namespace) -> int:
+    home = codex_home()
+    config_path = home / "config.toml"
+    backup_dir = home / "backups"
+    state = load_state(home)
+    proxy_url, source = resolve_proxy_url(args, state)
+    no_proxy = getattr(args, "no_proxy", None) or effective_setting(state, "proxy_no_proxy", DEFAULT_NO_PROXY)
+    no_proxy = no_proxy.strip() or DEFAULT_NO_PROXY
+
+    if not getattr(args, "skip_probe", False):
+        ok, detail = probe_http_proxy(proxy_url)
+        if not ok:
+            raise SwitchError(f"proxy probe failed for {proxy_url}: {detail}")
+        print(f"proxy_probe: ok ({detail})")
+
+    # Always remember the preference so a later switch to official can reapply
+    # it; only activate now when official mode is actually the current route.
+    state["proxy_preference"] = "true"
+    state["proxy_url"] = proxy_url
+    state["proxy_no_proxy"] = no_proxy
+    state["proxy_source"] = source
+    current_provider = configured_provider(read_config(config_path))
+    if current_provider != "openai":
+        state["proxy_enabled"] = "false"
+        save_state(home, state)
+        print("Saved the proxy preference. It applies only in official OpenAI mode;")
+        print("switch to official to activate it (custom API must stay proxy-free).")
+        print(f"codex_home: {home}")
+        print(f"proxy_url: {proxy_url}")
+        return 0
+
+    try:
+        set_launchd_proxy(proxy_url, no_proxy)
+    except subprocess.CalledProcessError as exc:
+        raise SwitchError(f"launchctl setenv failed for proxy environment: {exc}") from exc
+    try:
+        launch_agent = write_proxy_launch_agent(proxy_url, no_proxy)
+    except OSError as exc:
+        raise SwitchError(f"failed to write proxy LaunchAgent: {exc}") from exc
+    backup_file(config_path, backup_dir)
+    config = rewrite_config_for_proxy(read_config(config_path), proxy_url, no_proxy)
+    atomic_write(config_path, config, 0o600)
+    state["proxy_enabled"] = "true"
+    save_state(home, state)
+
+    print("Applied Codex proxy environment.")
+    print(f"codex_home: {home}")
+    print(f"proxy_url: {proxy_url}")
+    print(f"no_proxy: {no_proxy}")
+    print(f"launch_agent: {launch_agent}")
+    print(f"backup_dir: {backup_dir}")
+    restart_codex_after_proxy(args)
+    return 0
+
+
+def proxy_set(args: argparse.Namespace) -> int:
+    return proxy_apply(args)
+
+
+def proxy_off(args: argparse.Namespace) -> int:
+    home = codex_home()
+    backup_dir = home / "backups"
+    state = load_state(home)
+    deactivate_proxy_runtime(home)
+    # Explicit off means "don't want the proxy at all", so clear the preference
+    # too — otherwise a later switch to official would silently bring it back.
+    state["proxy_enabled"] = "false"
+    state["proxy_preference"] = "false"
+    save_state(home, state)
+    print("Disabled Codex proxy environment.")
+    print(f"codex_home: {home}")
+    print(f"backup_dir: {backup_dir}")
+    restart_codex_after_proxy(args)
+    return 0
+
+
 def switch_local(args: argparse.Namespace) -> int:
     home = codex_home()
     auth_path = home / "auth.json"
@@ -2023,6 +2413,7 @@ def switch_local(args: argparse.Namespace) -> int:
         catalog_path.unlink()
     config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, None)
     atomic_write(config_path, config, 0o600)
+    apply_proxy_for_provider(home, "custom", state)
     if not getattr(args, "restart_codex", False):
         repair_legacy_message_ids_and_report(home)
 
@@ -2062,6 +2453,7 @@ def switch_official(args: argparse.Namespace) -> int:
         print("Restored the stashed ChatGPT login; no re-login needed.")
     config = rewrite_config_for_official(read_config(config_path), model)
     atomic_write(config_path, config, 0o600)
+    apply_proxy_for_provider(home, "openai", state)
     if not getattr(args, "restart_codex", False):
         repair_legacy_message_ids_and_report(home)
 
@@ -2185,6 +2577,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         skip_login,
     )
     atomic_write(config_path, config, 0o600)
+    apply_proxy_for_provider(home, default_provider, state)
     if not getattr(args, "restart_codex", False):
         repair_legacy_message_ids_and_report(home)
 
@@ -2518,6 +2911,30 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_parser.add_argument("--official-model", help="Default official Codex model.")
     config_set_parser.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving.")
     config_set_parser.set_defaults(func=config_set)
+
+    proxy_parser = subparsers.add_parser("proxy", help="Manage Codex Desktop proxy environment for reconnect issues.")
+    proxy_subparsers = proxy_parser.add_subparsers(dest="proxy_command", required=True)
+    proxy_status_parser = proxy_subparsers.add_parser("status", help="Show saved, config.toml and launchd proxy settings.")
+    proxy_status_parser.add_argument("--probe", action="store_true", help="Verify the saved proxy can reach a stable test URL.")
+    proxy_status_parser.add_argument("--url", help=argparse.SUPPRESS)
+    proxy_status_parser.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
+    proxy_status_parser.set_defaults(func=proxy_status)
+    proxy_set_parser = proxy_subparsers.add_parser("set", help="Set and apply an HTTP/mixed proxy URL.")
+    proxy_set_parser.add_argument("--url", required=True, help="HTTP/mixed proxy URL, for example http://127.0.0.1:7897.")
+    proxy_set_parser.add_argument("--no-proxy", default=DEFAULT_NO_PROXY, help=f"Hosts that bypass the proxy. Default: {DEFAULT_NO_PROXY}")
+    proxy_set_parser.add_argument("--skip-probe", action="store_true", help="Skip the proxy reachability test before saving.")
+    proxy_set_parser.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after applying.")
+    proxy_set_parser.set_defaults(func=proxy_set, auto=False)
+    proxy_apply_parser = proxy_subparsers.add_parser("apply", help="Apply a saved proxy or auto-detect Clash Verge.")
+    proxy_apply_parser.add_argument("--url", help="HTTP/mixed proxy URL. Overrides saved and auto-detected values.")
+    proxy_apply_parser.add_argument("--auto", action="store_true", help="Read Clash Verge mixed-port/port from its local config.")
+    proxy_apply_parser.add_argument("--no-proxy", help=f"Hosts that bypass the proxy. Default: saved value or {DEFAULT_NO_PROXY}")
+    proxy_apply_parser.add_argument("--skip-probe", action="store_true", help="Skip the proxy reachability test before saving.")
+    proxy_apply_parser.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after applying.")
+    proxy_apply_parser.set_defaults(func=proxy_apply)
+    proxy_off_parser = proxy_subparsers.add_parser("off", help="Remove Codex proxy env vars from config.toml and launchd.")
+    proxy_off_parser.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after disabling.")
+    proxy_off_parser.set_defaults(func=proxy_off)
 
     configure = subparsers.add_parser("configure", help="Configure Codex official and custom providers in parallel.")
     configure_key_source = configure.add_mutually_exclusive_group()

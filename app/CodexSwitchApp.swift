@@ -68,6 +68,19 @@ enum UpdateState: Equatable {
     case failed
 }
 
+enum CompletedAction {
+    case provider
+    case proxyApplied
+    case proxyDisabled
+}
+
+enum BusyOperation {
+    case loading
+    case provider(SwitchTarget)
+    case proxyApplied
+    case proxyDisabled
+}
+
 private enum VersionComparator {
     static func isNewer(_ candidate: String, than current: String) -> Bool {
         let candidateParts = numericParts(candidate)
@@ -109,8 +122,14 @@ final class SwitchViewModel: ObservableObject {
     @Published var switchFailed = false
     @Published var completedMode = ProviderMode.custom
     @Published var completedTarget = SwitchTarget.codex
+    @Published var completedAction = CompletedAction.provider
+    @Published var busyOperation: BusyOperation?
     @Published var updateState = UpdateState.idle
     @Published var releaseURL = URL(string: "https://github.com/kuangre123/codex-switch/releases/latest")!
+    @Published var proxyEnabled = false
+    @Published var proxyURL = ""
+    @Published var proxySource = ""
+    @Published var proxyNoProxy = ""
 
     var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
@@ -126,10 +145,12 @@ final class SwitchViewModel: ObservableObject {
     func load(target: SwitchTarget = .codex) {
         checkForUpdates()
         isBusy = true
+        busyOperation = .loading
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let status = self.run(self.statusArguments(for: target))
             let config = self.run(self.configShowArguments(for: target))
+            let proxy = target == .codex ? self.run(["proxy", "status"]) : nil
             DispatchQueue.main.async {
                 self.statusValues = self.parse(status.output)
                 let values = self.parse(config.output)
@@ -139,10 +160,23 @@ final class SwitchViewModel: ObservableObject {
                 self.useChatAdapter = (values["chat_adapter"] ?? "true") != "false"
                 self.skipLogin = (values["skip_login"] ?? "false") == "true"
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
-                if status.status != 0 || config.status != 0 {
-                    self.output = [status.output, config.output].filter { !$0.isEmpty }.joined(separator: "\n")
+                if let proxy {
+                    self.updateProxyState(from: proxy.output)
+                } else {
+                    self.proxyEnabled = false
+                    self.proxyURL = ""
+                    self.proxySource = ""
+                    self.proxyNoProxy = ""
+                }
+                let failures = [status, config, proxy].compactMap { result -> String? in
+                    guard let result, result.status != 0, !result.output.isEmpty else { return nil }
+                    return result.output
+                }
+                if !failures.isEmpty {
+                    self.output = failures.joined(separator: "\n")
                 }
                 self.isBusy = false
+                self.busyOperation = nil
             }
         }
     }
@@ -194,9 +228,11 @@ final class SwitchViewModel: ObservableObject {
 
     func switchProvider(to mode: ProviderMode, target: SwitchTarget) {
         isBusy = true
+        busyOperation = .provider(target)
         output = ""
         switchSucceeded = false
         switchFailed = false
+        completedAction = .provider
         let baseURL = localBaseURL
         let local = localModel
         let displayName = localModelDisplayName
@@ -228,6 +264,7 @@ final class SwitchViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.output = save.output
                     self.isBusy = false
+                    self.busyOperation = nil
                     self.switchFailed = true
                 }
                 return
@@ -244,6 +281,7 @@ final class SwitchViewModel: ObservableObject {
                 self.output = switched.output
                 self.statusValues = self.parse(status.output)
                 self.isBusy = false
+                self.busyOperation = nil
                 self.completedMode = mode
                 self.completedTarget = target
                 if switched.status == 0 {
@@ -290,6 +328,7 @@ final class SwitchViewModel: ObservableObject {
             self.output = configured.output
             self.statusValues = self.parse(status.output)
             self.isBusy = false
+            self.busyOperation = nil
             self.completedTarget = .codex
             self.completedMode = mode
             if configured.status == 0 {
@@ -297,6 +336,55 @@ final class SwitchViewModel: ObservableObject {
                 self.switchSucceeded = true
             } else {
                 self.switchFailed = true
+            }
+        }
+    }
+
+    func autoDetectAndApplyProxy() {
+        performProxy(
+            ["proxy", "apply", "--auto", "--restart-codex"],
+            completedAction: .proxyApplied,
+            busyOperation: .proxyApplied
+        )
+    }
+
+    func applyProxy() {
+        performProxy(
+            ["proxy", "set", "--url", proxyURL, "--restart-codex"],
+            completedAction: .proxyApplied,
+            busyOperation: .proxyApplied
+        )
+    }
+
+    func disableProxy() {
+        performProxy(
+            ["proxy", "off", "--restart-codex"],
+            completedAction: .proxyDisabled,
+            busyOperation: .proxyDisabled
+        )
+    }
+
+    private func performProxy(_ arguments: [String], completedAction: CompletedAction, busyOperation: BusyOperation) {
+        isBusy = true
+        self.busyOperation = busyOperation
+        output = ""
+        switchSucceeded = false
+        switchFailed = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let action = self.run(arguments)
+            let proxy = self.run(["proxy", "status"])
+            DispatchQueue.main.async {
+                self.output = action.output
+                self.updateProxyState(from: proxy.output)
+                self.isBusy = false
+                self.busyOperation = nil
+                self.completedAction = completedAction
+                if action.status == 0 {
+                    self.switchSucceeded = true
+                } else {
+                    self.switchFailed = true
+                }
             }
         }
     }
@@ -357,6 +445,16 @@ final class SwitchViewModel: ObservableObject {
         }
         return values
     }
+
+    private func updateProxyState(from output: String) {
+        let values = parse(output)
+        proxyEnabled = values["proxy_enabled"] == "true"
+        let url = values["proxy_url"] ?? ""
+        proxyURL = url == "(missing)" ? "" : url
+        let source = values["proxy_source"] ?? ""
+        proxySource = source == "(missing)" ? "" : source
+        proxyNoProxy = values["proxy_no_proxy"] ?? ""
+    }
 }
 
 struct ContentView: View {
@@ -384,6 +482,9 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 statusCard
+                if targetTool == .codex {
+                    connectionRepairCard
+                }
                 settingsCard
                 if !model.output.isEmpty {
                     outputCard
@@ -609,6 +710,78 @@ struct ContentView: View {
         }
     }
 
+    private var connectionRepairCard: some View {
+        GroupBox(texts.text("Codex 连接修复", "Codex Connection Repair")) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Label(
+                        proxyStatusTitle,
+                        systemImage: model.proxyEnabled ? "checkmark.circle.fill" : "circle.dashed"
+                    )
+                    .foregroundStyle(model.proxyEnabled ? Color.green : .secondary)
+                    Spacer()
+                    Text(texts.text("仅 HTTP/mixed", "HTTP/mixed only"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                settingRow(texts.text("本机代理地址", "Local Proxy URL")) {
+                    TextField("http://127.0.0.1:7897", text: $model.proxyURL)
+                        .font(.system(.body, design: .monospaced))
+                        .disableAutocorrection(true)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        model.autoDetectAndApplyProxy()
+                    } label: {
+                        Label(texts.text("自动检测并修复", "Auto Detect and Repair"), systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
+                    .help(texts.text("从 Clash Verge 的 mixed-port 或 HTTP 端口读取代理设置", "Read the Clash Verge mixed-port or HTTP proxy port"))
+
+                    Button {
+                        model.applyProxy()
+                    } label: {
+                        Label(texts.text("应用当前地址", "Apply Current URL"), systemImage: "network")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isBusy || model.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help(texts.text("验证代理后写入 Codex 与 launchd，并重启 Codex", "Verify the proxy, update Codex and launchd, then restart Codex"))
+
+                    Button(role: .destructive) {
+                        model.disableProxy()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isBusy || !model.proxyEnabled)
+                    .help(texts.text("关闭 Codex 的代理环境变量并重启 Codex", "Remove the Codex proxy environment and restart Codex"))
+                }
+
+                if !model.proxySource.isEmpty || !model.proxyNoProxy.isEmpty {
+                    HStack(spacing: 6) {
+                        if !model.proxySource.isEmpty {
+                            Text("\(texts.text("来源", "Source")): \(model.proxySource)")
+                        }
+                        if !model.proxySource.isEmpty && !model.proxyNoProxy.isEmpty {
+                            Text("·")
+                        }
+                        if !model.proxyNoProxy.isEmpty {
+                            Text("NO_PROXY: \(model.proxyNoProxy)")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 6)
+        }
+    }
+
     private var actionBar: some View {
         VStack(spacing: 0) {
             Divider()
@@ -628,9 +801,20 @@ struct ContentView: View {
     }
 
     private var progressText: String {
-        targetTool == .codex
-            ? texts.text("正在保存并重启 Codex…", "Saving and restarting Codex…")
-            : texts.text("正在切换 Claude Code 配置…", "Switching Claude Code settings…")
+        switch model.busyOperation {
+        case .loading:
+            return texts.text("正在读取当前配置…", "Loading current settings…")
+        case .proxyApplied:
+            return texts.text("正在检测代理并重启 Codex…", "Checking the proxy and restarting Codex…")
+        case .proxyDisabled:
+            return texts.text("正在移除代理并重启 Codex…", "Removing the proxy and restarting Codex…")
+        case let .provider(target):
+            return target == .codex
+                ? texts.text("正在保存并重启 Codex…", "Saving and restarting Codex…")
+                : texts.text("正在切换 Claude Code 配置…", "Switching Claude Code settings…")
+        case nil:
+            return texts.text("正在处理…", "Working…")
+        }
     }
 
     private var primaryButtonTitle: String {
@@ -699,6 +883,20 @@ struct ContentView: View {
                 ? texts.text("请检查配置后重试。", "Check the configuration and try again.")
                 : model.output
         }
+        switch model.completedAction {
+        case .proxyApplied:
+            return texts.text(
+                "已写入 Codex 与 launchd 的 HTTP/mixed 代理环境，并重启 Codex。",
+                "The HTTP/mixed proxy environment was written to Codex and launchd, then Codex was restarted."
+            )
+        case .proxyDisabled:
+            return texts.text(
+                "已移除 Codex 的代理环境变量，并重启 Codex。",
+                "The Codex proxy environment was removed and Codex was restarted."
+            )
+        case .provider:
+            break
+        }
         if model.completedTarget == .claude {
             return model.completedMode == .custom
                 ? texts.text("已切换 Claude Code 到自定义 API。请重新打开 Claude Code 终端会话让设置生效。", "Switched Claude Code to the custom API. Restart Claude Code terminal sessions to apply it.")
@@ -715,6 +913,12 @@ struct ContentView: View {
             return texts.text("输入 API Key", "Enter API key")
         }
         return texts.text("留空沿用 \(savedKey)", "Leave blank to keep \(savedKey)")
+    }
+
+    private var proxyStatusTitle: String {
+        model.proxyEnabled
+            ? texts.text("代理已启用", "Proxy enabled")
+            : texts.text("代理未启用", "Proxy disabled")
     }
 
     private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {

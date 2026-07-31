@@ -463,6 +463,205 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertNotIn('model_catalog_json', config)
             self.assertFalse((home / "codex-switch-model-catalog.json").exists())
 
+    def test_proxy_set_writes_codex_config_launchd_and_persistent_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(list(cmd))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            args = SimpleNamespace(
+                url="127.0.0.1:7897",
+                no_proxy=cli_module.DEFAULT_NO_PROXY,
+                skip_probe=True,
+                restart_codex=False,
+                auto=False,
+            )
+            with mock.patch.object(cli_module, "codex_home", return_value=home), \
+                    mock.patch.object(cli_module, "proxy_launch_agent_path", return_value=launch_agent), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(cli_module.sys, "platform", "darwin"):
+                result = cli_module.proxy_set(args)
+
+            self.assertEqual(result, 0)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn("[shell_environment_policy.set]", config)
+            self.assertIn('HTTP_PROXY = "http://127.0.0.1:7897"', config)
+            self.assertIn('HTTPS_PROXY = "http://127.0.0.1:7897"', config)
+            self.assertIn('NO_PROXY = "localhost,127.0.0.1,::1"', config)
+            state = read_state(home)
+            self.assertEqual(state["proxy_enabled"], "true")
+            self.assertEqual(state["proxy_url"], "http://127.0.0.1:7897")
+            self.assertEqual(state["proxy_source"], "manual")
+            self.assertTrue(any(call == ["launchctl", "setenv", "HTTP_PROXY", "http://127.0.0.1:7897"] for call in calls))
+            self.assertTrue(any(call[:3] == ["launchctl", "bootstrap", cli_module.launchctl_gui_target()] for call in calls))
+            self.assertIn("launchctl setenv HTTP_PROXY", launch_agent.read_text(encoding="utf-8"))
+
+    def test_proxy_off_removes_codex_config_launchd_and_persistent_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(list(cmd))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            apply_args = SimpleNamespace(
+                url="http://127.0.0.1:7897",
+                no_proxy=cli_module.DEFAULT_NO_PROXY,
+                skip_probe=True,
+                restart_codex=False,
+                auto=False,
+            )
+            off_args = SimpleNamespace(restart_codex=False)
+            with mock.patch.object(cli_module, "codex_home", return_value=home), \
+                    mock.patch.object(cli_module, "proxy_launch_agent_path", return_value=launch_agent), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(cli_module.sys, "platform", "darwin"):
+                cli_module.proxy_set(apply_args)
+                self.assertTrue(launch_agent.exists())
+                result = cli_module.proxy_off(off_args)
+
+            self.assertEqual(result, 0)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertNotIn("HTTP_PROXY", config)
+            self.assertNotIn("HTTPS_PROXY", config)
+            self.assertNotIn("NO_PROXY", config)
+            self.assertFalse(launch_agent.exists())
+            self.assertEqual(read_state(home)["proxy_enabled"], "false")
+            self.assertTrue(any(call == ["launchctl", "unsetenv", "HTTP_PROXY"] for call in calls))
+
+    def test_proxy_apply_auto_detects_clash_verge_mixed_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "clash-verge.yaml"
+            config.write_text("mode: rule\nmixed-port: 7897\nport: 7890\n", encoding="utf-8")
+            args = SimpleNamespace(url=None, auto=True)
+            with mock.patch.object(cli_module, "clash_verge_config_candidates", return_value=[config]):
+                proxy_url, source = cli_module.resolve_proxy_url(args, {})
+            self.assertEqual(proxy_url, "http://127.0.0.1:7897")
+            self.assertEqual(source, "clash-verge")
+
+    def test_proxy_rejects_socks_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+
+            result = run_tool(home, "proxy", "set", "--url", "socks5://127.0.0.1:7897", "--skip-probe")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("proxy URL must use the HTTP proxy protocol", result.stderr)
+
+    def _proxy_toggle_patches(self, home, launch_agent, calls):
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return (
+            mock.patch.object(cli_module, "proxy_launch_agent_path", return_value=launch_agent),
+            mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run),
+            mock.patch.object(cli_module.sys, "platform", "darwin"),
+        )
+
+    def test_switch_to_custom_deactivates_proxy_but_keeps_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+            p1, p2, p3 = self._proxy_toggle_patches(home, launch_agent, calls)
+            # Start with an active proxy in config + a saved preference.
+            with p1, p2, p3:
+                cli_module.activate_proxy_runtime(home, "http://127.0.0.1:7897", cli_module.DEFAULT_NO_PROXY)
+                self.assertIn("HTTP_PROXY", (home / "config.toml").read_text(encoding="utf-8"))
+                state = {"proxy_preference": "true", "proxy_enabled": "true",
+                         "proxy_url": "http://127.0.0.1:7897", "proxy_no_proxy": cli_module.DEFAULT_NO_PROXY}
+                cli_module.apply_proxy_for_provider(home, "custom", state)
+
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertNotIn("HTTP_PROXY", config)
+            self.assertEqual(state["proxy_enabled"], "false")
+            # Preference survives so official mode can bring it back.
+            self.assertEqual(read_state(home)["proxy_preference"], "true")
+            self.assertTrue(any(c == ["launchctl", "unsetenv", "HTTP_PROXY"] for c in calls))
+
+    def test_switch_to_official_reactivates_proxy_from_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)  # no proxy yet
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+            p1, p2, p3 = self._proxy_toggle_patches(home, launch_agent, calls)
+            state = {"proxy_preference": "true", "proxy_enabled": "false",
+                     "proxy_url": "http://127.0.0.1:7897", "proxy_no_proxy": cli_module.DEFAULT_NO_PROXY}
+            with p1, p2, p3:
+                cli_module.apply_proxy_for_provider(home, "openai", state)
+
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('HTTP_PROXY = "http://127.0.0.1:7897"', config)
+            self.assertEqual(state["proxy_enabled"], "true")
+            self.assertTrue(any(c == ["launchctl", "setenv", "HTTP_PROXY", "http://127.0.0.1:7897"] for c in calls))
+            self.assertTrue(launch_agent.exists())
+
+    def test_switch_to_official_without_preference_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+            p1, p2, p3 = self._proxy_toggle_patches(home, launch_agent, calls)
+            state = {"proxy_preference": "false", "proxy_enabled": "false"}
+            with p1, p2, p3:
+                cli_module.apply_proxy_for_provider(home, "openai", state)
+
+            self.assertNotIn("HTTP_PROXY", (home / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(state["proxy_enabled"], "false")
+            self.assertFalse(any(c[:2] == ["launchctl", "setenv"] for c in calls))
+            self.assertFalse(launch_agent.exists())
+
+    def test_proxy_apply_in_custom_mode_saves_preference_without_activating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)  # model_provider = "custom"
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+            args = SimpleNamespace(url="http://127.0.0.1:7897", no_proxy=cli_module.DEFAULT_NO_PROXY,
+                                   skip_probe=True, restart_codex=False, auto=False)
+            p1, p2, p3 = self._proxy_toggle_patches(home, launch_agent, calls)
+            with mock.patch.object(cli_module, "codex_home", return_value=home), p1, p2, p3:
+                result = cli_module.proxy_apply(args)
+
+            self.assertEqual(result, 0)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertNotIn("HTTP_PROXY", config)  # not activated in custom mode
+            state = read_state(home)
+            self.assertEqual(state["proxy_preference"], "true")
+            self.assertEqual(state["proxy_enabled"], "false")
+            self.assertEqual(state["proxy_url"], "http://127.0.0.1:7897")
+            self.assertFalse(any(c[:2] == ["launchctl", "setenv"] for c in calls))
+
+    def test_proxy_off_clears_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)  # official mode
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+            apply_args = SimpleNamespace(url="http://127.0.0.1:7897", no_proxy=cli_module.DEFAULT_NO_PROXY,
+                                         skip_probe=True, restart_codex=False, auto=False)
+            off_args = SimpleNamespace(restart_codex=False)
+            p1, p2, p3 = self._proxy_toggle_patches(home, launch_agent, calls)
+            with mock.patch.object(cli_module, "codex_home", return_value=home), p1, p2, p3:
+                cli_module.proxy_apply(apply_args)
+                self.assertEqual(read_state(home)["proxy_preference"], "true")
+                cli_module.proxy_off(off_args)
+
+            self.assertEqual(read_state(home)["proxy_preference"], "false")
+            self.assertEqual(read_state(home)["proxy_enabled"], "false")
+
     def test_configure_codex_does_not_retag_existing_conversations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"

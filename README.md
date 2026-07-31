@@ -37,6 +37,7 @@ The app is **signed with a Developer ID and notarized by Apple**, and is a **uni
 - **Chat 适配器**：接口只支持 `/chat/completions`（如 DeepSeek/Kimi/千问等）时，在本地启动一个代理，自动把 Codex 的 Responses 请求转成 Chat Completions；原生支持 `/responses` 的接口则直连。
 - **保存时智能探测**：保存前先用你的 Key 试探接入点（先 `/responses` 再 `/chat/completions`），都不通就当场报错「请检查设置」，不会留下一个用不了的会话。
 - **跳过登录**：可选绕过 ChatGPT OAuth，用 API‑Key 模式。
+- **代理修复**：一键把本机 HTTP/mixed 代理写入 Codex shell 环境、当前 macOS `launchd` 环境和登录后恢复用的 LaunchAgent，修复官方模式下新任务反复 Reconnecting。代理**只在官方 OpenAI 模式生效**：切到自定义 API 时自动关闭（自定义链路走本地 adapter + 国内直连中转，经代理反而会断流），切回官方时按你的设置自动恢复。
 - **CLI 通用**：同时写入 `[profiles.ccswitch]`（自定义）和 `[profiles.official]`（官方），终端里 `codex` / `codex-official` 直接用。
 - 自动备份到 `~/.codex/backups`；工具栏自动检查 GitHub 新版本；保存后自动重启 Codex 让配置生效。
 
@@ -69,9 +70,21 @@ codex-switch configure \
   --restart-codex
 
 # 终端里：codex 走自定义（profile ccswitch），codex-official 走官方
+
+# 修复 Codex 新任务 Reconnecting：自动读取 Clash Verge mixed-port
+codex-switch proxy apply --auto --restart-codex
+
+# 或手动指定 HTTP/mixed 代理入口
+codex-switch proxy set --url http://127.0.0.1:7897 --restart-codex
+
+# 查看 / 关闭代理修复
+codex-switch proxy status --probe
+codex-switch proxy off --restart-codex
 ```
 
 `--custom-model` 是发给你接口的真实上游模型 ID。`--chat-adapter` 会在 `127.0.0.1:17638` 起一个本地服务，把 Responses 桥接成 Chat Completions。`--probe` 在保存前验证接入点是否可用。
+
+`proxy` 命令只接受 HTTP/mixed 代理 URL，例如 `http://127.0.0.1:7897`。不要把 SOCKS5 端口直接填进去；`NO_PROXY` 默认保留 `localhost,127.0.0.1,::1`，避免本地 adapter 被错误送进代理。
 
 ## 会改动哪些文件 / What it changes
 
@@ -80,6 +93,7 @@ codex-switch configure \
 ~/.codex/config.toml                # provider、默认模型、CLI profiles
 ~/.codex/codex-switch-state.json    # 工具自己的设置
 ~/.codex/codex-switch-adapter.py    # Chat 适配器脚本（稳定副本）
+~/Library/LaunchAgents/com.kuangre.codex-switch.proxy.plist  # 可选：登录后恢复代理环境
 ```
 
 不会改写会话数据库或会话内容。仅在检测到旧版适配器生成的 `item_...` message ID 时修复为协议要求的 `msg_...`，原文件备份在 `~/.codex/backups_state/message-id-repair/`。

@@ -11,8 +11,10 @@ APP_PATH="$HOME/Applications/Codex Switch.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/app/Info.plist" 2>/dev/null || echo "dev")"
 DMG_PATH="$DIST_DIR/Codex-Switch-v${VERSION}.dmg"
 
-# Rebuild the app so the DMG always ships the current code.
-"$ROOT_DIR/scripts/package-app.sh" >/dev/null
+# Rebuild the app so the DMG always ships the current code. Production
+# distributions need a secure timestamp before notarization; local developer
+# builds intentionally leave timestamping off.
+CODEX_SWITCH_TIMESTAMP_SIGN=1 "$ROOT_DIR/scripts/package-app.sh" >/dev/null
 
 mkdir -p "$DIST_DIR"
 STAGING="$(mktemp -d)"
