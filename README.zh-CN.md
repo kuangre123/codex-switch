@@ -12,14 +12,17 @@ Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载，**推荐 DMG**：
+从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载 `Codex-Switch-vX.Y.Z.dmg`。
 
-```text
-Codex-Switch-vX.Y.Z.dmg        # 推荐：已签名 + 公证，双击即开
-Codex-Switch-vX.Y.Z-macOS.zip
-```
+应用已用 **Developer ID 签名并通过 Apple 公证**，且为 **通用二进制（Intel + Apple 芯片）**，不会有"未受信任的开发者"提示。
 
-应用已用 **Developer ID 签名并通过 Apple 公证**，且为 **通用二进制（Intel + Apple 芯片）**。打开 DMG 把 `Codex Switch.app` 拖进「应用程序」即可，不会再有"未受信任的开发者"提示。
+**安装（请务必拖进「应用程序」再启动）：**
+
+1. 双击 DMG 打开
+2. 把 `Codex Switch.app` **拖进「应用程序」文件夹**
+3. 从「应用程序」里启动
+
+> ⚠️ 不要从 DMG 窗口里、或「下载」目录里直接双击运行。那样 macOS 会以「隔离（App Translocation）」方式从临时路径运行，导致内置代理服务连接异常。拖进「应用程序」这一步会解除隔离。
 
 ## 功能
 

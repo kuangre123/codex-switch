@@ -17,16 +17,11 @@ It turns hand‑editing `~/.codex/auth.json` and `config.toml` into one save: Of
 
 ## 下载 / Download
 
-从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载，**推荐 DMG**：
+从 [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest) 下载 `Codex-Switch-vX.Y.Z.dmg`。
 
-```text
-Codex-Switch-vX.Y.Z.dmg        # 推荐：已签名 + 公证，双击即开
-Codex-Switch-vX.Y.Z-macOS.zip
-```
+应用已用 **Developer ID 签名并通过 Apple 公证（notarized）**，也是 **通用二进制（Intel + Apple 芯片）**，不会有"未受信任的开发者"提示。**安装：双击 DMG → 把 `Codex Switch.app` 拖进「应用程序」→ 从「应用程序」启动。** 请勿从 DMG 窗口或「下载」目录里直接运行，否则会触发 macOS 隔离（App Translocation），导致内置代理服务连接异常。
 
-应用已用 **Developer ID 签名并通过 Apple 公证（notarized）**，也是 **通用二进制（Intel + Apple 芯片）**。打开 DMG 后把 `Codex Switch.app` 拖进「应用程序」即可，**不会再有"未受信任的开发者"提示**。
-
-The app is **signed with a Developer ID and notarized by Apple**, and is a **universal binary (Intel + Apple Silicon)**. Open the DMG, drag `Codex Switch.app` into Applications — no Gatekeeper warning.
+Download `Codex-Switch-vX.Y.Z.dmg` from the [GitHub Releases](https://github.com/kuangre123/codex-switch/releases/latest). The app is **signed with a Developer ID and notarized by Apple**, and is a **universal binary (Intel + Apple Silicon)**. **Install by dragging `Codex Switch.app` into Applications, then launch it from there** — do not run it straight from the DMG window or your Downloads folder, or macOS App Translocation will run it from a temp path and break the built-in proxy helper.
 
 ## 功能 / Features
 
