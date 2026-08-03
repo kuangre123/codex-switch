@@ -1173,6 +1173,43 @@ def _append_error(errors: list[str] | None, message: str) -> None:
         errors.append(message[:300])
 
 
+def sanitize_reasoning_item(item: object) -> None:
+    """In place: empty a reasoning item's plaintext ``content`` and drop the
+    relay's non-official ``encrypted_content``.
+
+    Relays that natively speak the Responses protocol (the passthrough path)
+    return reasoning items carrying plaintext content plus an encrypted_content
+    blob that is not OpenAI's real encryption. Codex stores those verbatim, and
+    the official Responses API later rejects the conversation because reasoning
+    items must have empty content ("array_above_max_length ... maximum length
+    0"). Stripping both here keeps custom-provider conversations replayable on
+    the official API — the same clean shape the chat bridge always produced.
+    The human-readable ``summary`` is preserved.
+    """
+    if isinstance(item, dict) and item.get("type") == "reasoning":
+        if "content" in item:
+            item["content"] = []
+        item.pop("encrypted_content", None)
+
+
+def sanitize_reasoning_in_payload(obj: object) -> object:
+    """Sanitize reasoning items anywhere a Responses SSE event or a full
+    Responses object can carry them: the single ``item`` an output_item.* event
+    holds, and every entry of an ``output`` array (top-level for a complete
+    response object, or nested under ``response`` for created/completed events).
+    """
+    if not isinstance(obj, dict):
+        return obj
+    item = obj.get("item")
+    if isinstance(item, dict):
+        sanitize_reasoning_item(item)
+    for container in (obj, obj.get("response")):
+        if isinstance(container, dict) and isinstance(container.get("output"), list):
+            for entry in container["output"]:
+                sanitize_reasoning_item(entry)
+    return obj
+
+
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     try:
         return exc.read(500).decode("utf-8", errors="replace")
@@ -1581,6 +1618,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 _append_error(errors, "/responses → JSON response has no output")
                 return None
             result = normalize_response_output_message_ids(result)
+            sanitize_reasoning_in_payload(result)
             result["id"] = resp_id
             raw_usage = result.get("usage") or {}
             if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
@@ -1952,6 +1990,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             return False
         resp_id = str(result.get("id") or f"resp_{uuid.uuid4().hex}")
         result = normalize_response_output_message_ids(result)
+        sanitize_reasoning_in_payload(result)
         result["id"] = resp_id
         raw_usage = result.get("usage") or {}
         if isinstance(raw_usage, dict) and "input_tokens" not in raw_usage:
@@ -1975,15 +2014,42 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.write_response_stream(result)
         return True
 
+    def _sanitize_sse_line(self, line: bytes) -> bytes:
+        # Rewrite only SSE `data:` lines that carry JSON; event:/id:/blank lines
+        # pass through untouched. Reasoning items are stripped of plaintext
+        # content so custom-provider conversations stay official-replayable.
+        body = line[:-1] if line.endswith(b"\r") else line
+        if not body.startswith(b"data:"):
+            return line
+        payload = body[5:].strip()
+        if not payload or payload == b"[DONE]":
+            return line
+        try:
+            obj = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return line
+        sanitize_reasoning_in_payload(obj)
+        rewritten = b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        if line.endswith(b"\r"):
+            rewritten += b"\r"
+        return rewritten
+
     def _relay_sse_body(self, response: object, upstream_model: str) -> bool:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         stream_ok = False
+        buf = b""
         try:
             for chunk in response:
-                self.wfile.write(chunk)
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    self.wfile.write(self._sanitize_sse_line(line) + b"\n")
+                self.wfile.flush()
+            if buf:
+                self.wfile.write(self._sanitize_sse_line(buf))
                 self.wfile.flush()
             stream_ok = True
         except Exception:

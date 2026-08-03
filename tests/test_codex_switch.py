@@ -1050,6 +1050,73 @@ class CodexSwitchTests(unittest.TestCase):
         # Chat-style usage keys are normalized to Responses keys.
         self.assertIn('"input_tokens": 3', stream)
 
+    def test_sanitize_reasoning_item_strips_content_keeps_summary(self) -> None:
+        item = {
+            "type": "reasoning", "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "ok"}],
+            "content": [{"type": "reasoning_text", "text": "secret chain of thought"}],
+            "encrypted_content": "fake-blob",
+        }
+        cli_module.sanitize_reasoning_item(item)
+        self.assertEqual(item["content"], [])
+        self.assertNotIn("encrypted_content", item)
+        self.assertEqual(item["summary"], [{"type": "summary_text", "text": "ok"}])
+        # Non-reasoning items are untouched.
+        msg = {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}
+        cli_module.sanitize_reasoning_item(msg)
+        self.assertEqual(msg["content"], [{"type": "output_text", "text": "hi"}])
+
+    def test_sanitize_reasoning_in_payload_covers_item_and_output_shapes(self) -> None:
+        # output_item.done event
+        ev = {"type": "response.output_item.done", "item": {"type": "reasoning", "content": [{"x": 1}], "encrypted_content": "b"}}
+        cli_module.sanitize_reasoning_in_payload(ev)
+        self.assertEqual(ev["item"]["content"], [])
+        self.assertNotIn("encrypted_content", ev["item"])
+        # response.completed event (output nested under response)
+        comp = {"type": "response.completed", "response": {"output": [
+            {"type": "reasoning", "content": [{"x": 1}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "hi"}]},
+        ]}}
+        cli_module.sanitize_reasoning_in_payload(comp)
+        self.assertEqual(comp["response"]["output"][0]["content"], [])
+        self.assertEqual(comp["response"]["output"][1]["content"], [{"type": "output_text", "text": "hi"}])
+        # top-level output (non-streaming passthrough result)
+        res = {"id": "r", "output": [{"type": "reasoning", "content": [{"x": 1}], "encrypted_content": "b"}]}
+        cli_module.sanitize_reasoning_in_payload(res)
+        self.assertEqual(res["output"][0]["content"], [])
+
+    def test_relay_passthrough_strips_reasoning_content_from_sse_stream(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+        handler = self._make_adapter_handler()
+        # A native-Responses relay stream carrying a reasoning item WITH plaintext
+        # content + a bogus encrypted_content, then a message and completion.
+        sse = (
+            b'event: response.output_item.done\n'
+            b'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"s"}],"content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":"BOGUS"}}\n\n'
+            b'event: response.completed\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_up","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":"BOGUS"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+
+        def fake_urlopen(req, timeout=None):
+            return self._FakeUpstreamResponse(sse, "text/event-stream")
+
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            handled = handler.relay_responses_stream({"input": []}, "https://relay.example", "gpt-5.6-terra", "sk-x", [])
+
+        self.assertTrue(handled)
+        out = handler.wfile.getvalue().decode("utf-8")
+        # Plaintext reasoning + bogus encryption removed; message text + framing intact.
+        self.assertNotIn("THINK", out)
+        self.assertNotIn("BOGUS", out)
+        self.assertIn('"output_text"', out)
+        self.assertIn("done", out)
+        self.assertIn("event: response.completed", out)
+        self.assertIn("data: [DONE]", out)
+        # The reasoning item is still present, just with emptied content.
+        self.assertIn('"type": "reasoning"', out)
+        self.assertIn('"summary"', out)
+
     def test_chat_relay_retries_after_connection_dropped_without_response(self) -> None:
         import http.client
         handler = self._make_adapter_handler()
