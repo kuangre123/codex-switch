@@ -182,6 +182,63 @@ class CodexHomeResolutionTests(unittest.TestCase):
             self.assertEqual(cli_module._resolved_home(), Path("/var/folders/ab/T/tmpXYZ"))
 
 
+class UpstreamModelsTests(unittest.TestCase):
+    class _Resp:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def test_models_url_handles_v1_suffix(self) -> None:
+        self.assertEqual(cli_module.models_url("https://x.com/v1"), "https://x.com/v1/models")
+        self.assertEqual(cli_module.models_url("https://x.com"), "https://x.com/v1/models")
+        self.assertEqual(cli_module.models_url("https://x.com/v1/"), "https://x.com/v1/models")
+
+    def test_fetch_upstream_models_parses_openai_shape_and_dedupes(self) -> None:
+        body = json.dumps({"data": [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": ""}, {"nope": 1}]}).encode()
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["ua"] = req.headers.get("User-agent")
+            captured["auth"] = req.headers.get("Authorization")
+            return self._Resp(body)
+
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            models = cli_module.fetch_upstream_models("https://relay.example/v1", "sk-key")
+
+        self.assertEqual(models, ["a", "b"])
+        self.assertEqual(captured["url"], "https://relay.example/v1/models")
+        self.assertEqual(captured["ua"], cli_module.UPSTREAM_USER_AGENT)
+        self.assertEqual(captured["auth"], "Bearer sk-key")
+
+    def test_fetch_upstream_models_accepts_bare_list(self) -> None:
+        body = json.dumps(["m1", "m2"]).encode()
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=lambda req, timeout=None: self._Resp(body)):
+            self.assertEqual(cli_module.fetch_upstream_models("https://r/v1", ""), ["m1", "m2"])
+
+    def test_fetch_upstream_models_raises_on_http_error(self) -> None:
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b"no route"))
+
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaisesRegex(cli_module.SwitchError, "HTTP 404"):
+                cli_module.fetch_upstream_models("https://r/v1", "k")
+
+    def test_fetch_upstream_models_raises_on_empty(self) -> None:
+        body = json.dumps({"data": []}).encode()
+        with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=lambda req, timeout=None: self._Resp(body)):
+            with self.assertRaisesRegex(cli_module.SwitchError, "空的模型列表"):
+                cli_module.fetch_upstream_models("https://r/v1", "k")
+
+
 class CodexSwitchTests(unittest.TestCase):
     def test_local_switch_preserves_unrelated_config_and_stores_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

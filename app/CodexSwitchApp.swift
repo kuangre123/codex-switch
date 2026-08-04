@@ -118,6 +118,9 @@ final class SwitchViewModel: ObservableObject {
     @Published var officialModel = ""
     @Published var output = ""
     @Published var isBusy = false
+    @Published var fetchedModels: [String] = []
+    @Published var isFetchingModels = false
+    @Published var modelFetchError = ""
     @Published var switchSucceeded = false
     @Published var switchFailed = false
     @Published var completedMode = ProviderMode.custom
@@ -435,6 +438,43 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
+    func fetchUpstreamModels() {
+        let baseURL = localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseURL.isEmpty else {
+            modelFetchError = "请先填写自定义 API 地址"
+            return
+        }
+        let enteredKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        isFetchingModels = true
+        modelFetchError = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            var arguments = ["upstream-models", "--base-url", baseURL]
+            var input: String?
+            // Pass the just-typed key over stdin so it never lands in the
+            // process argument list; fall back to the saved key when empty.
+            if !enteredKey.isEmpty {
+                arguments.append("--api-key-stdin")
+                input = enteredKey + "\n"
+            }
+            let result = self.run(arguments, standardInput: input)
+            let models = result.output
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            DispatchQueue.main.async {
+                self.isFetchingModels = false
+                if result.status == 0 && !models.isEmpty {
+                    self.fetchedModels = models
+                    self.modelFetchError = ""
+                } else {
+                    self.fetchedModels = []
+                    self.modelFetchError = result.output.isEmpty ? "未能获取模型列表" : result.output
+                }
+            }
+        }
+    }
+
     private func parse(_ output: String) -> [String: String] {
         var values: [String: String] = [:]
         for line in output.split(separator: "\n") {
@@ -660,10 +700,50 @@ struct ContentView: View {
                         settingRow(texts.text("自定义 API 地址", "Custom API URL")) {
                             TextField("https://example.com", text: $model.localBaseURL)
                                 .disableAutocorrection(true)
+                                .onChange(of: model.localBaseURL) { _ in
+                                    model.fetchedModels = []
+                                    model.modelFetchError = ""
+                                }
                         }
                         settingRow(texts.text(targetTool == .codex ? "上游模型 ID" : "自定义模型 ID", targetTool == .codex ? "Upstream Model ID" : "Custom Model ID")) {
-                            TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
-                                .disableAutocorrection(true)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.localModel)
+                                        .disableAutocorrection(true)
+                                    if model.isFetchingModels {
+                                        ProgressView().controlSize(.small)
+                                    } else if model.fetchedModels.isEmpty {
+                                        Button {
+                                            model.fetchUpstreamModels()
+                                        } label: {
+                                            Label(texts.text("拉取模型", "Fetch models"), systemImage: "arrow.down.circle")
+                                        }
+                                        .help(texts.text("从该接入点的 /v1/models 拉取可用模型，直接选择", "Fetch selectable models from this endpoint's /v1/models"))
+                                    } else {
+                                        Menu {
+                                            ForEach(model.fetchedModels, id: \.self) { candidate in
+                                                Button(candidate) {
+                                                    model.localModel = candidate
+                                                    if model.localModelDisplayName.trimmingCharacters(in: .whitespaces).isEmpty {
+                                                        model.localModelDisplayName = candidate
+                                                    }
+                                                }
+                                            }
+                                            Divider()
+                                            Button(texts.text("重新拉取", "Refresh")) { model.fetchUpstreamModels() }
+                                        } label: {
+                                            Label(texts.text("选择模型（\(model.fetchedModels.count)）", "Pick model (\(model.fetchedModels.count))"), systemImage: "list.bullet")
+                                        }
+                                    }
+                                }
+                                if !model.modelFetchError.isEmpty {
+                                    Text(model.modelFetchError)
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                        .lineLimit(2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                         }
                         if targetTool == .codex {
                             settingRow(texts.text("显示名称", "Display Name")) {

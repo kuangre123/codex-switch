@@ -1086,6 +1086,55 @@ def responses_url(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
+def models_url(base_url: str) -> str:
+    base = strip_trailing_slash(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+def fetch_upstream_models(base_url: str, api_key: str, timeout: float = 20.0) -> list[str]:
+    """GET the upstream's OpenAI-style /v1/models and return the model IDs.
+
+    Raises SwitchError with a user-facing message on any failure (missing
+    endpoint, auth, bad JSON) so the desktop can show it verbatim. The
+    UPSTREAM_USER_AGENT header is required: some relays sit behind a CDN that
+    rejects the default urllib UA with 403/1010.
+    """
+    if not base_url.strip():
+        raise SwitchError("请先填写自定义 API 地址。")
+    headers = {"User-Agent": UPSTREAM_USER_AGENT}
+    if api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    request = urllib.request.Request(models_url(base_url), headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read(300).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise SwitchError(f"获取模型列表失败：HTTP {exc.code} {detail}".strip()) from exc
+    except Exception as exc:  # URLError, timeout, JSON errors, …
+        raise SwitchError(f"获取模型列表失败：{exc}") from exc
+    # OpenAI shape: {"data": [{"id": "..."}]}. Some relays return a bare list.
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise SwitchError("该接入点未返回标准的模型列表（缺少 data 数组）。")
+    seen: set[str] = set()
+    models: list[str] = []
+    for item in items:
+        model_id = item.get("id") if isinstance(item, dict) else (item if isinstance(item, str) else None)
+        if isinstance(model_id, str) and model_id.strip() and model_id not in seen:
+            seen.add(model_id)
+            models.append(model_id.strip())
+    if not models:
+        raise SwitchError("该接入点返回了空的模型列表。")
+    return models
+
+
 # Fields from Codex's Responses requests that third-party / relay Responses
 # implementations most often reject with 400: OpenAI-bookkeeping fields first,
 # generation-tuning fields as a last resort. Tools are never dropped — losing
@@ -2725,6 +2774,26 @@ def status(_: argparse.Namespace) -> int:
     return 0
 
 
+def upstream_models(args: argparse.Namespace) -> int:
+    """List the models a custom/relay API advertises via /v1/models, so the
+    desktop can offer a pick-list instead of a hand-typed model ID."""
+    home = codex_home()
+    state = load_state(home)
+    base_url = args.base_url or effective_setting(
+        state, "adapter_upstream_base_url", effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
+    )
+    api_key = args.api_key or ""
+    if getattr(args, "api_key_stdin", False):
+        api_key = sys.stdin.readline().strip()
+    if not api_key:
+        auth = load_auth(home / "auth.json")
+        api_key = effective_setting(state, "local_api_key", str(auth.get("OPENAI_API_KEY") or ""))
+    models = fetch_upstream_models(base_url, api_key)
+    for model_id in models:
+        print(model_id)
+    return 0
+
+
 def config_show(_: argparse.Namespace) -> int:
     home = codex_home()
     state = load_state(home)
@@ -3002,6 +3071,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show current Codex switch-relevant state.")
     status_parser.set_defaults(func=status)
+
+    upstream_models_parser = subparsers.add_parser(
+        "upstream-models", help="List the models a custom/relay API advertises via /v1/models."
+    )
+    upstream_models_parser.add_argument("--base-url", help="Custom API base URL. Default: saved setting.")
+    upstream_models_parser.add_argument("--api-key", help="API key. Default: saved key.")
+    upstream_models_parser.add_argument("--api-key-stdin", action="store_true", help="Read the API key from stdin.")
+    upstream_models_parser.set_defaults(func=upstream_models)
 
     config_parser = subparsers.add_parser("config", help="Show or update Codex Switch defaults.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
