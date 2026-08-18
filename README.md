@@ -107,4 +107,4 @@ bash scripts/build-release-dmg.sh   # 需要完整 Xcode；有 Developer ID + AS
 
 狂热AI（X：[@CrazyAIAgent](https://x.com/CrazyAIAgent)）
 
-友情赞助商：  https://icodeeasy.cc/register?code=INV_RBJUZH
+友情赞助商： 一个好用的中转：  https://icodeeasy.cc/register?code=INV_RBJUZH
