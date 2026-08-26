@@ -633,7 +633,9 @@ def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: s
         if section == "":
             lines = set_key(lines, "model_provider", CUSTOM_PROVIDER_ID)
             lines = set_key(lines, "model", model)
-            lines = set_key(lines, "preferred_auth_method", "chatgpt")
+            # Custom always authenticates as api-key: the new Codex rejects
+            # custom models on a ChatGPT account.
+            lines = set_key(lines, "preferred_auth_method", "api-key")
             if catalog_path is not None:
                 lines = set_key(lines, "model_catalog_json", str(catalog_path))
             else:
@@ -676,7 +678,10 @@ def rewrite_config_for_parallel(
     else:
         selected_provider = "openai"
         selected_model = official_model
-    auth_method = "api-key" if skip_login else "chatgpt"
+    # The custom provider must authenticate as api-key: the new Codex rejects
+    # custom models on a ChatGPT account, so a custom default always uses
+    # api-key regardless of the skip-login toggle.
+    auth_method = "api-key" if (skip_login or default_provider == CUSTOM_PROVIDER_ID) else "chatgpt"
     for section, lines in sections:
         if section == "":
             lines = set_key(lines, "model_provider", selected_provider)
@@ -2271,17 +2276,21 @@ def backup_sqlite_database(db_path: Path, backup_dir: Path) -> Path:
     return target
 
 
-def sync_thread_provider_tags(home: Path, provider: str) -> int:
-    """Keep conversations visible in the merged ChatGPT.app after a switch.
+def sync_thread_provider_tags(home: Path, provider: str, model: str) -> int:
+    """Retag conversations to the active provider AND model after a switch.
 
-    That app filters the conversation sidebar by model_provider (verified
+    The merged ChatGPT.app filters the sidebar by model_provider (verified
     2026-07: with the custom provider active every openai-tagged conversation
-    vanishes from the list, and vice versa), so retag the sqlite rows to the
-    newly selected provider. ONLY the provider column changes: the model
-    column keeps recording which model each conversation really used, and
-    rollout files are never touched — rewriting them is what corrupted
-    message IDs before 0.7.13. Databases are backed up first, and failures
-    never abort the switch.
+    vanishes, and vice versa), so retagging the provider keeps history visible.
+    But provider and model must move together: a custom-model row left tagged
+    to the openai provider (or vice versa) is an invalid pair the new Codex
+    rejects with "model … is not supported when using Codex with a ChatGPT
+    account". Custom models also can't be detected by name (slugs like
+    stealth/ox-alpha carry no codex-switch/ prefix), so both columns are set
+    to the active pair — a continued conversation uses the active model anyway.
+    Only sqlite is touched (the source Codex reads for a thread's model);
+    rollout files are never rewritten (that corrupted message IDs before
+    0.7.13). Databases are backed up first, and failures never abort the switch.
     """
     updated = 0
     for db_path in thread_database_paths(home):
@@ -2294,8 +2303,9 @@ def sync_thread_provider_tags(home: Path, provider: str) -> int:
             try:
                 with connection:
                     cursor = connection.execute(
-                        "UPDATE threads SET model_provider = ? WHERE model_provider != ?",
-                        (provider, provider),
+                        "UPDATE threads SET model_provider = ?, model = ? "
+                        "WHERE model_provider != ? OR model != ?",
+                        (provider, model, provider, model),
                     )
                     updated += cursor.rowcount
             finally:
@@ -2352,9 +2362,9 @@ def restart_codex(
     # the whole history vanishes from the list after a switch. Only the
     # provider column changes; conversation content, per-thread models, and
     # rollout files stay untouched (see sync_thread_provider_tags).
-    tagged = sync_thread_provider_tags(home, expected_provider)
+    tagged = sync_thread_provider_tags(home, expected_provider, expected_model)
     if tagged:
-        print(f"Tagged {tagged} conversation(s) to {expected_provider} so they stay listed.")
+        print(f"Tagged {tagged} conversation(s) to {expected_provider}/{expected_model} so they stay listed and usable.")
     launched = None
     for attempt in range(3):
         if attempt:
@@ -2551,14 +2561,14 @@ def switch_local(args: argparse.Namespace) -> int:
     backup_file(config_path, backup_dir)
     backup_file(catalog_path, backup_dir)
     auth["OPENAI_API_KEY"] = api_key
-    auth["auth_mode"] = "chatgpt"
-    restored_login = restore_login_tokens(auth, state)
-    # auth.json first: a crash before save_state leaves the stash in place,
-    # which the next restore harmlessly drops in favor of the live tokens.
-    write_auth(auth_path, auth)
+    # Custom mode must authenticate as api-key so the new Codex accepts custom
+    # models (it rejects them on a ChatGPT account). Stash the ChatGPT login so
+    # switching back to official restores it.
+    stash_login_tokens(auth, state)
+    auth["auth_mode"] = "api-key"
+    auth.pop("tokens", None)
     save_state(home, state)
-    if restored_login:
-        print("Restored the stashed ChatGPT login; no re-login needed.")
+    write_auth(auth_path, auth)
     # Never write a custom model_catalog_json (see configure_codex). Switching
     # never retags conversations; the one-time legacy-ID repair is handled
     # separately and leaves their content/metadata intact.
@@ -2693,12 +2703,16 @@ def configure_codex(args: argparse.Namespace) -> int:
     provider_base_url = DEFAULT_ADAPTER_BASE_URL
     skip_login = getattr(args, "skip_login", False)
     state["skip_login"] = "true" if skip_login else "false"
+    # A custom default must authenticate as api-key regardless of the toggle:
+    # the new Codex rejects custom models on a ChatGPT account. Official default
+    # keeps the ChatGPT login unless the user explicitly bypasses it.
+    use_api_key_auth = skip_login or default_provider == CUSTOM_PROVIDER_ID
 
     auth["OPENAI_API_KEY"] = api_key
     # Write ordering matters: whichever file still holds the login must be
     # written second, so a crash between the two writes never loses it (the
     # next restore prefers live auth.json tokens and drops the stash).
-    if skip_login:
+    if use_api_key_auth:
         stash_login_tokens(auth, state)
         auth["auth_mode"] = "api-key"
         auth.pop("tokens", None)

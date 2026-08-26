@@ -262,14 +262,15 @@ class CodexSwitchTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("sk-test-secret", result.stdout)
+            # Custom authenticates as api-key so the new Codex accepts the model.
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-test-secret"},
+                {"auth_mode": "api-key", "OPENAI_API_KEY": "sk-test-secret"},
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "custom"', config)
             self.assertIn('model = "gpt-5.5"', config)
-            self.assertIn('preferred_auth_method = "chatgpt"', config)
+            self.assertIn('preferred_auth_method = "api-key"', config)
             self.assertIn('base_url = "http://127.0.0.1:15721/v1"', config)
             self.assertIn('requires_openai_auth = false', config)
             self.assertIn('wire_api = "responses"', config)
@@ -400,7 +401,7 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {"auth_mode": "chatgpt", "OPENAI_API_KEY": "sk-cached-secret"},
+                {"auth_mode": "api-key", "OPENAI_API_KEY": "sk-cached-secret"},
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('base_url = "http://127.0.0.1:18888/v1"', config)
@@ -1325,13 +1326,17 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("stdin was empty", result.stderr)
 
-    def test_local_switch_preserves_existing_chatgpt_tokens(self) -> None:
+    def test_local_switch_stashes_existing_chatgpt_tokens(self) -> None:
+        # Custom mode switches to api-key auth (the new Codex rejects custom
+        # models on a ChatGPT account), so any live ChatGPT login is moved into
+        # the stash — preserved for restore on the way back to official, but
+        # removed from auth.json so Codex no longer sees a ChatGPT account.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_sample_config(home)
             (home / "auth.json").write_text(
                 json.dumps({
-                    "auth_mode": "apikey",
+                    "auth_mode": "chatgpt",
                     "OPENAI_API_KEY": None,
                     "tokens": {
                         "access_token": "current-access",
@@ -1344,17 +1349,12 @@ class CodexSwitchTests(unittest.TestCase):
             result = run_tool(home, "local", "--api-key", "sk-test-secret")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                json.loads((home / "auth.json").read_text(encoding="utf-8")),
-                {
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": "sk-test-secret",
-                    "tokens": {
-                        "access_token": "current-access",
-                        "refresh_token": "current-refresh",
-                    },
-                },
-            )
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            self.assertEqual(auth["auth_mode"], "api-key")
+            self.assertNotIn("tokens", auth)
+            self.assertEqual(auth["OPENAI_API_KEY"], "sk-test-secret")
+            stash = read_state(home)["stashed_chatgpt_login"]
+            self.assertEqual(stash["tokens"], {"access_token": "current-access", "refresh_token": "current-refresh"})
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('experimental_bearer_token = "sk-test-secret"', config)
 
@@ -1795,10 +1795,11 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Restarted Codex.app", result.stdout)
 
-    def test_restart_retags_thread_providers_but_keeps_models(self) -> None:
-        # The merged ChatGPT.app filters the sidebar by model_provider, so a
-        # restart-driven switch must retag rows to the selected provider —
-        # while leaving each conversation's real model untouched.
+    def test_restart_retags_thread_provider_and_model_to_active_pair(self) -> None:
+        # The merged ChatGPT.app filters the sidebar by model_provider, and the
+        # new Codex rejects a custom-model row tagged to the openai provider, so
+        # a restart-driven switch retags BOTH provider and model to the active
+        # pair — no invalid (openai, codex-switch/*) combinations survive.
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_local_config(home)  # model_provider = "custom"
@@ -1808,41 +1809,43 @@ class CodexSwitchTests(unittest.TestCase):
             def run_ok(cmd, **kwargs):
                 return SimpleNamespace(returncode=1 if cmd[0] == "pgrep" else 0, stdout="", stderr="")
 
+            # write_local_config pins config.toml to custom/gpt-5.5, so the
+            # active pair is (custom, gpt-5.5); every thread flattens to it.
             with mock.patch.object(cli_module.subprocess, "run", side_effect=run_ok), mock.patch.object(cli_module.time, "sleep"):
                 cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
-                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
-                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            self.assertEqual(providers, {"custom"})
-            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
+                pairs = {tuple(row) for row in connection.execute("SELECT model_provider, model FROM threads")}
+            self.assertEqual(pairs, {("custom", "gpt-5.5")})
 
-    def test_sync_thread_provider_tags_updates_all_databases_and_backs_up(self) -> None:
+    def test_sync_thread_tags_flattens_provider_and_model_and_backs_up(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             write_thread_database(home)  # legacy ~/.codex/sqlite/state_5.sqlite
-            # Merged-app layout: live DB directly under ~/.codex.
+            # Merged-app layout: live DB directly under ~/.codex, with a broken
+            # (openai, codex-switch/*) pair that must be repaired.
             root_db = home / "state_5.sqlite"
             with closing(sqlite3.connect(root_db)) as connection:
                 connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT)")
                 connection.executemany(
                     "INSERT INTO threads VALUES (?, ?, ?)",
-                    [("t1", "openai", "gpt-5.6-sol"), ("t2", "openai", "gpt-5.5"), ("t3", "custom", "glm-5.2")],
+                    [("t1", "openai", "codex-switch/gpt-5.6-sol"), ("t2", "openai", "gpt-5.5"), ("t3", "custom", "stealth/ox-alpha")],
                 )
                 connection.commit()
 
-            updated = cli_module.sync_thread_provider_tags(home, "custom")
+            updated = cli_module.sync_thread_provider_tags(home, "custom", "stealth/ox-alpha")
 
-            self.assertEqual(updated, 2 + 3)  # root: t1,t2; legacy DB: 3 openai rows
+            # root: t1,t2 changed (t3 already matches); legacy DB: all 4 rows.
+            self.assertEqual(updated, 2 + 4)
             with closing(sqlite3.connect(root_db)) as connection:
                 rows = list(connection.execute("SELECT model_provider, model FROM threads ORDER BY id"))
-            self.assertEqual(rows, [("custom", "gpt-5.6-sol"), ("custom", "gpt-5.5"), ("custom", "glm-5.2")])
+            self.assertEqual(rows, [("custom", "stealth/ox-alpha")] * 3)
             backups = list((home / "backups_state" / "provider-tag").rglob("state_5.sqlite"))
             self.assertTrue(backups)
             # Missing databases are tolerated.
             empty_home = Path(temp) / "empty"
             empty_home.mkdir()
-            self.assertEqual(cli_module.sync_thread_provider_tags(empty_home, "openai"), 0)
+            self.assertEqual(cli_module.sync_thread_provider_tags(empty_home, "openai", "gpt-5.5"), 0)
 
     def test_restart_launch_failure_warns_instead_of_failing(self) -> None:
         # LaunchServices can refuse to relaunch (-609) while the old process is
@@ -1894,15 +1897,13 @@ class CodexSwitchTests(unittest.TestCase):
                     cli_module.restart_codex(args, home, "custom", "gpt-5.5")
 
             # Rollout files are never rewritten, even on mismatch; the sqlite
-            # provider tag was already applied for the intended provider.
+            # rows were already flattened to the intended active pair.
             meta = json.loads(rollout.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(meta["payload"]["model_provider"], "custom")
             self.assertEqual(meta["payload"]["model"], "codex-switch/gpt-5.5")
             with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
-                providers = {row[0] for row in connection.execute("SELECT model_provider FROM threads")}
-                models = {row[0] for row in connection.execute("SELECT model FROM threads")}
-            self.assertEqual(providers, {"custom"})
-            self.assertEqual(models, {"gpt-5.5", "codex-switch/gpt-5.5"})
+                pairs = {tuple(row) for row in connection.execute("SELECT model_provider, model FROM threads")}
+            self.assertEqual(pairs, {("custom", "gpt-5.5")})
 
 
 if __name__ == "__main__":
