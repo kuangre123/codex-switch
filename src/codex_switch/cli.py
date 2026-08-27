@@ -1227,41 +1227,47 @@ def _append_error(errors: list[str] | None, message: str) -> None:
         errors.append(message[:300])
 
 
-def sanitize_reasoning_item(item: object) -> None:
-    """In place: empty a reasoning item's plaintext ``content`` and drop the
-    relay's non-official ``encrypted_content``.
-
-    Relays that natively speak the Responses protocol (the passthrough path)
-    return reasoning items carrying plaintext content plus an encrypted_content
-    blob that is not OpenAI's real encryption. Codex stores those verbatim, and
-    the official Responses API later rejects the conversation because reasoning
-    items must have empty content ("array_above_max_length ... maximum length
-    0"). Stripping both here keeps custom-provider conversations replayable on
-    the official API — the same clean shape the chat bridge always produced.
-    The human-readable ``summary`` is preserved.
-    """
-    if isinstance(item, dict) and item.get("type") == "reasoning":
-        if "content" in item:
-            item["content"] = []
-        item.pop("encrypted_content", None)
+def _is_reasoning_item(value: object) -> bool:
+    return isinstance(value, dict) and value.get("type") == "reasoning"
 
 
-def sanitize_reasoning_in_payload(obj: object) -> object:
-    """Sanitize reasoning items anywhere a Responses SSE event or a full
-    Responses object can carry them: the single ``item`` an output_item.* event
-    holds, and every entry of an ``output`` array (top-level for a complete
-    response object, or nested under ``response`` for created/completed events).
+def _drop_reasoning_from_output(container: object) -> None:
+    """In place: remove every reasoning entry from a container's ``output``
+    list (top-level for a complete response object, or nested under
+    ``response`` for created/completed events)."""
+    if isinstance(container, dict) and isinstance(container.get("output"), list):
+        container["output"] = [
+            entry for entry in container["output"] if not _is_reasoning_item(entry)
+        ]
+
+
+def sanitize_reasoning_in_payload(obj: object) -> bool:
+    """Drop reasoning items so a custom-provider conversation never persists a
+    reasoning shell that the official Responses API later 404s on.
+
+    A relay reasoning item carries a temporary id and no real
+    ``encrypted_content``. Codex stores it verbatim, and after switching back
+    to the official provider (``store=false``) the API does a store lookup on
+    that id and fails ("Item with id 'rs_tmp_…' not found"). Emptying the
+    content (the old behavior) wasn't enough — the id itself is the problem —
+    so the reasoning item must not reach Codex at all.
+
+    Returns ``True`` when ``obj`` is itself a standalone reasoning SSE event
+    whose entire ``event:``/``data:`` frame the caller should drop (a per-item
+    ``output_item.*`` event whose ``item`` is reasoning, or a reasoning-scoped
+    ``response.reasoning*`` delta/summary event). Otherwise reasoning entries
+    are stripped from any ``output`` array in place and ``False`` is returned.
     """
     if not isinstance(obj, dict):
-        return obj
-    item = obj.get("item")
-    if isinstance(item, dict):
-        sanitize_reasoning_item(item)
-    for container in (obj, obj.get("response")):
-        if isinstance(container, dict) and isinstance(container.get("output"), list):
-            for entry in container["output"]:
-                sanitize_reasoning_item(entry)
-    return obj
+        return False
+    if _is_reasoning_item(obj.get("item")):
+        return True
+    event_type = obj.get("type")
+    if isinstance(event_type, str) and event_type.startswith("response.reasoning"):
+        return True
+    _drop_reasoning_from_output(obj)
+    _drop_reasoning_from_output(obj.get("response"))
+    return False
 
 
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
@@ -2068,25 +2074,39 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.write_response_stream(result)
         return True
 
-    def _sanitize_sse_line(self, line: bytes) -> bytes:
-        # Rewrite only SSE `data:` lines that carry JSON; event:/id:/blank lines
-        # pass through untouched. Reasoning items are stripped of plaintext
-        # content so custom-provider conversations stay official-replayable.
-        body = line[:-1] if line.endswith(b"\r") else line
-        if not body.startswith(b"data:"):
-            return line
-        payload = body[5:].strip()
+    def _sanitize_sse_event(self, event: bytes) -> bytes | None:
+        """Given one full SSE event (its ``event:``/``data:`` lines joined by
+        ``\\n``, without the trailing blank line), return the bytes to forward
+        or ``None`` to drop the whole event.
+
+        A reasoning event is dropped in its entirety — dropping only its
+        ``data:`` line would leave a dangling ``event:`` line and a malformed
+        frame. Complete-response events have reasoning pruned from their output
+        array; every other event passes through with its ``data:`` re-encoded.
+        """
+        lines = event.split(b"\n")
+        data_index = None
+        for index, raw in enumerate(lines):
+            body = raw[:-1] if raw.endswith(b"\r") else raw
+            if body.startswith(b"data:"):
+                data_index = index
+                payload = body[5:].strip()
+                break
+        if data_index is None:
+            return event
         if not payload or payload == b"[DONE]":
-            return line
+            return event
         try:
             obj = json.loads(payload.decode("utf-8"))
         except Exception:
-            return line
-        sanitize_reasoning_in_payload(obj)
+            return event
+        if sanitize_reasoning_in_payload(obj):
+            return None
         rewritten = b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        if line.endswith(b"\r"):
+        if lines[data_index].endswith(b"\r"):
             rewritten += b"\r"
-        return rewritten
+        lines[data_index] = rewritten
+        return b"\n".join(lines)
 
     def _relay_sse_body(self, response: object, upstream_model: str) -> bool:
         self.send_response(200)
@@ -2095,16 +2115,34 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         stream_ok = False
         buf = b""
+        event_lines: list[bytes] = []
+
+        def flush_event() -> None:
+            if not event_lines:
+                return
+            event = b"\n".join(event_lines)
+            event_lines.clear()
+            out = self._sanitize_sse_event(event)
+            if out is not None:
+                self.wfile.write(out + b"\n\n")
+
         try:
             for chunk in response:
                 buf += chunk
+                # SSE events are delimited by a blank line (LF or CRLF). Buffer
+                # each event's lines and flush the whole event at the boundary,
+                # so a reasoning event is dropped as one frame.
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
-                    self.wfile.write(self._sanitize_sse_line(line) + b"\n")
+                    if line == b"" or line == b"\r":
+                        flush_event()
+                    else:
+                        event_lines.append(line)
                 self.wfile.flush()
             if buf:
-                self.wfile.write(self._sanitize_sse_line(buf))
-                self.wfile.flush()
+                event_lines.append(buf)
+            flush_event()
+            self.wfile.flush()
             stream_ok = True
         except Exception:
             pass
@@ -2142,6 +2180,12 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         response_payload = normalize_response_output_message_ids(response_payload)
         output = response_payload.get("output")
         if isinstance(output, list):
+            # Drop reasoning items entirely (custom mode) before enumerating, so
+            # no reasoning shell is emitted and the surviving items re-index into
+            # a contiguous output sequence. The pruned list is written back so
+            # the final response.completed carries the same clean output.
+            output = [item for item in output if not _is_reasoning_item(item)]
+            response_payload["output"] = output
             for index, item in enumerate(output):
                 if not isinstance(item, dict):
                     continue

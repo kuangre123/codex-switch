@@ -1108,51 +1108,57 @@ class CodexSwitchTests(unittest.TestCase):
         # Chat-style usage keys are normalized to Responses keys.
         self.assertIn('"input_tokens": 3', stream)
 
-    def test_sanitize_reasoning_item_strips_content_keeps_summary(self) -> None:
-        item = {
-            "type": "reasoning", "id": "rs_1",
-            "summary": [{"type": "summary_text", "text": "ok"}],
-            "content": [{"type": "reasoning_text", "text": "secret chain of thought"}],
-            "encrypted_content": "fake-blob",
-        }
-        cli_module.sanitize_reasoning_item(item)
-        self.assertEqual(item["content"], [])
-        self.assertNotIn("encrypted_content", item)
-        self.assertEqual(item["summary"], [{"type": "summary_text", "text": "ok"}])
-        # Non-reasoning items are untouched.
-        msg = {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}
-        cli_module.sanitize_reasoning_item(msg)
-        self.assertEqual(msg["content"], [{"type": "output_text", "text": "hi"}])
+    def test_drop_reasoning_helpers_identify_and_prune(self) -> None:
+        reasoning = {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": None}
+        message = {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}
+        self.assertTrue(cli_module._is_reasoning_item(reasoning))
+        self.assertFalse(cli_module._is_reasoning_item(message))
+        self.assertFalse(cli_module._is_reasoning_item("nope"))
+        # _drop_reasoning_from_output removes reasoning entries in place, keeps the rest.
+        container = {"output": [reasoning, message]}
+        cli_module._drop_reasoning_from_output(container)
+        self.assertEqual(container["output"], [message])
+        # Containers without an output list are tolerated.
+        cli_module._drop_reasoning_from_output({"id": "r"})
 
-    def test_sanitize_reasoning_in_payload_covers_item_and_output_shapes(self) -> None:
-        # output_item.done event
-        ev = {"type": "response.output_item.done", "item": {"type": "reasoning", "content": [{"x": 1}], "encrypted_content": "b"}}
-        cli_module.sanitize_reasoning_in_payload(ev)
-        self.assertEqual(ev["item"]["content"], [])
-        self.assertNotIn("encrypted_content", ev["item"])
-        # response.completed event (output nested under response)
+    def test_sanitize_reasoning_in_payload_drops_items_and_flags_standalone_events(self) -> None:
+        # A per-item reasoning event: the whole SSE frame must be dropped.
+        ev = {"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_tmp_x", "encrypted_content": None}}
+        self.assertTrue(cli_module.sanitize_reasoning_in_payload(ev))
+        # A reasoning-scoped delta/summary event is also dropped whole.
+        delta = {"type": "response.reasoning_summary_text.delta", "delta": "thinking"}
+        self.assertTrue(cli_module.sanitize_reasoning_in_payload(delta))
+        # response.completed event (output nested under response): reasoning is
+        # removed from the array, the message survives, and the frame is kept.
         comp = {"type": "response.completed", "response": {"output": [
-            {"type": "reasoning", "content": [{"x": 1}]},
+            {"type": "reasoning", "id": "rs_tmp_y", "content": [{"x": 1}]},
             {"type": "message", "content": [{"type": "output_text", "text": "hi"}]},
         ]}}
-        cli_module.sanitize_reasoning_in_payload(comp)
-        self.assertEqual(comp["response"]["output"][0]["content"], [])
-        self.assertEqual(comp["response"]["output"][1]["content"], [{"type": "output_text", "text": "hi"}])
-        # top-level output (non-streaming passthrough result)
-        res = {"id": "r", "output": [{"type": "reasoning", "content": [{"x": 1}], "encrypted_content": "b"}]}
-        cli_module.sanitize_reasoning_in_payload(res)
-        self.assertEqual(res["output"][0]["content"], [])
+        self.assertFalse(cli_module.sanitize_reasoning_in_payload(comp))
+        self.assertEqual(comp["response"]["output"], [
+            {"type": "message", "content": [{"type": "output_text", "text": "hi"}]},
+        ])
+        # top-level output (non-streaming passthrough result): reasoning dropped.
+        res = {"id": "r", "output": [
+            {"type": "reasoning", "id": "rs_tmp_z", "content": [{"x": 1}], "encrypted_content": None},
+            {"type": "message", "content": [{"type": "output_text", "text": "ok"}]},
+        ]}
+        self.assertFalse(cli_module.sanitize_reasoning_in_payload(res))
+        self.assertEqual(res["output"], [
+            {"type": "message", "content": [{"type": "output_text", "text": "ok"}]},
+        ])
 
-    def test_relay_passthrough_strips_reasoning_content_from_sse_stream(self) -> None:
+    def test_relay_passthrough_drops_reasoning_items_from_sse_stream(self) -> None:
         cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
         handler = self._make_adapter_handler()
-        # A native-Responses relay stream carrying a reasoning item WITH plaintext
-        # content + a bogus encrypted_content, then a message and completion.
+        # A native-Responses relay stream carrying a standalone reasoning event
+        # (its own output_item frame) plus a reasoning entry inside the completed
+        # response's output, then a message and completion.
         sse = (
             b'event: response.output_item.done\n'
-            b'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"s"}],"content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":"BOGUS"}}\n\n'
+            b'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_tmp_1","summary":[{"type":"summary_text","text":"s"}],"content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":null}}\n\n'
             b'event: response.completed\n'
-            b'data: {"type":"response.completed","response":{"id":"resp_up","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":"BOGUS"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}\n\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_up","output":[{"type":"reasoning","id":"rs_tmp_1","content":[{"type":"reasoning_text","text":"THINK"}],"encrypted_content":null},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}\n\n'
             b'data: [DONE]\n\n'
         )
 
@@ -1164,16 +1170,17 @@ class CodexSwitchTests(unittest.TestCase):
 
         self.assertTrue(handled)
         out = handler.wfile.getvalue().decode("utf-8")
-        # Plaintext reasoning + bogus encryption removed; message text + framing intact.
+        # The reasoning item is dropped entirely (no shell to persist and later
+        # 404 on the official API); message text + framing stay intact.
         self.assertNotIn("THINK", out)
-        self.assertNotIn("BOGUS", out)
+        self.assertNotIn("reasoning", out)
+        self.assertNotIn("rs_tmp_1", out)
         self.assertIn('"output_text"', out)
         self.assertIn("done", out)
         self.assertIn("event: response.completed", out)
         self.assertIn("data: [DONE]", out)
-        # The reasoning item is still present, just with emptied content.
-        self.assertIn('"type": "reasoning"', out)
-        self.assertIn('"summary"', out)
+        # The standalone reasoning output_item frame is gone, not just its data line.
+        self.assertNotIn("response.output_item.done", out)
 
     def test_chat_relay_retries_after_connection_dropped_without_response(self) -> None:
         import http.client
