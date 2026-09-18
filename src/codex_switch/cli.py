@@ -36,6 +36,8 @@ DEFAULT_CUSTOM_MODEL = f"{CUSTOM_MODEL_SLUG_PREFIX}gpt-5.5"
 DEFAULT_UPSTREAM_MODEL = "gpt-5.5"
 DEFAULT_ADAPTER_HOST = "127.0.0.1"
 DEFAULT_ADAPTER_PORT = 17638
+ADAPTER_LAUNCH_AGENT_LABEL = "com.kuangre.codex-switch.adapter"
+PROXY_LAUNCH_AGENT_LABEL = "com.kuangre.codex-switch.proxy"
 DEFAULT_ADAPTER_BASE_URL = f"http://{DEFAULT_ADAPTER_HOST}:{DEFAULT_ADAPTER_PORT}/v1"
 CLAUDE_DEFAULT_BASE_URL = "http://127.0.0.1:15721"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -399,7 +401,17 @@ def normalize_proxy_url(value: str) -> str:
 
 
 def proxy_launch_agent_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+    return Path.home() / "Library" / "LaunchAgents" / f"{PROXY_LAUNCH_AGENT_LABEL}.plist"
+
+
+def enable_launch_agent(label: str) -> None:
+    # Switching an item off under System Settings > General > Login Items &
+    # Extensions > Allow in the Background records the service as "disabled" in
+    # launchd's per-user override database. From then on every `launchctl
+    # bootstrap` of it fails with the opaque "5: Input/output error" (launchd's
+    # own log says "119: Service is disabled"). Clearing the override is
+    # idempotent and needs no root for the user's own gui domain.
+    subprocess.run(["launchctl", "enable", f"{launchctl_gui_target()}/{label}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def clash_verge_config_candidates() -> list[Path]:
@@ -521,7 +533,7 @@ def write_proxy_launch_agent(proxy_url: str, no_proxy: str) -> Path:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.kuangre.codex-switch.proxy</string>
+  <string>{PROXY_LAUNCH_AGENT_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
@@ -536,6 +548,7 @@ def write_proxy_launch_agent(proxy_url: str, no_proxy: str) -> Path:
     atomic_write(path, content, 0o644)
     if sys.platform == "darwin":
         subprocess.run(["launchctl", "bootout", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        enable_launch_agent(PROXY_LAUNCH_AGENT_LABEL)
         subprocess.run(["launchctl", "bootstrap", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return path
 
@@ -2231,7 +2244,7 @@ def run_adapter(args: argparse.Namespace) -> int:
 
 
 def adapter_launch_agent_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.kuangre.codex-switch.adapter.plist"
+    return Path.home() / "Library" / "LaunchAgents" / f"{ADAPTER_LAUNCH_AGENT_LABEL}.plist"
 
 
 def launchctl_gui_target() -> str:
@@ -2260,7 +2273,7 @@ def write_adapter_launch_agent(home: Path, host: str = DEFAULT_ADAPTER_HOST, por
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.kuangre.codex-switch.adapter</string>
+  <string>{ADAPTER_LAUNCH_AGENT_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{xml_escape(cli_path)}</string>
@@ -2290,9 +2303,18 @@ def write_adapter_launch_agent(home: Path, host: str = DEFAULT_ADAPTER_HOST, por
 
 def start_adapter_launch_agent(home: Path) -> Path:
     path = write_adapter_launch_agent(home)
-    subprocess.run(["launchctl", "bootout", launchctl_gui_target(), str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["launchctl", "bootstrap", launchctl_gui_target(), str(path)], check=True)
-    subprocess.run(["launchctl", "kickstart", "-k", f"{launchctl_gui_target()}/com.kuangre.codex-switch.adapter"], check=False)
+    target = launchctl_gui_target()
+    subprocess.run(["launchctl", "bootout", target, str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    enable_launch_agent(ADAPTER_LAUNCH_AGENT_LABEL)
+    result = subprocess.run(["launchctl", "bootstrap", target, str(path)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = " ".join((result.stderr or result.stdout or "").split()) or f"exit status {result.returncode}"
+        raise SwitchError(
+            f"launchd refused to load the adapter LaunchAgent {ADAPTER_LAUNCH_AGENT_LABEL} ({detail}). "
+            "Open System Settings > General > Login Items & Extensions > Allow in the Background, "
+            "make sure Codex Switch is switched on, then save the configuration again."
+        )
+    subprocess.run(["launchctl", "kickstart", "-k", f"{target}/{ADAPTER_LAUNCH_AGENT_LABEL}"], check=False)
     return path
 
 

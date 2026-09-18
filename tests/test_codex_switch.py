@@ -648,6 +648,74 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("proxy URL must use the HTTP proxy protocol", result.stderr)
 
+    def test_adapter_launch_agent_reenables_service_before_bootstrap(self) -> None:
+        # macOS marks a LaunchAgent "disabled" when it is switched off under
+        # System Settings > Login Items > Allow in the Background; launchd then
+        # rejects bootstrap with the opaque "5: Input/output error". Clearing
+        # that override first is what lets the adapter come back.
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.adapter.plist"
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(list(cmd))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module, "adapter_launch_agent_path", return_value=launch_agent), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run):
+                cli_module.start_adapter_launch_agent(home)
+
+            target = cli_module.launchctl_gui_target()
+            self.assertIn(["launchctl", "enable", f"{target}/com.kuangre.codex-switch.adapter"], calls)
+            enable_index = calls.index(["launchctl", "enable", f"{target}/com.kuangre.codex-switch.adapter"])
+            bootstrap_index = calls.index(["launchctl", "bootstrap", target, str(launch_agent)])
+            self.assertLess(enable_index, bootstrap_index)
+
+    def test_adapter_launch_agent_bootstrap_failure_is_a_switch_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.adapter.plist"
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["launchctl", "bootstrap"]:
+                    stderr = "Bootstrap failed: 5: Input/output error\nTry re-running the command as root for richer errors.\n"
+                    if kwargs.get("check"):
+                        raise subprocess.CalledProcessError(5, cmd, output="", stderr=stderr)
+                    return SimpleNamespace(returncode=5, stdout="", stderr=stderr)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module, "adapter_launch_agent_path", return_value=launch_agent), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    self.assertRaises(cli_module.SwitchError) as raised:
+                cli_module.start_adapter_launch_agent(home)
+
+            message = str(raised.exception)
+            self.assertIn("com.kuangre.codex-switch.adapter", message)
+            self.assertIn("Bootstrap failed: 5: Input/output error", message)
+            self.assertIn("Allow in the Background", message)
+
+    def test_proxy_launch_agent_reenables_service_before_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            launch_agent = Path(temp) / "LaunchAgents" / "com.kuangre.codex-switch.proxy.plist"
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(list(cmd))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module, "proxy_launch_agent_path", return_value=launch_agent), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(cli_module.sys, "platform", "darwin"):
+                cli_module.write_proxy_launch_agent("http://127.0.0.1:7897", cli_module.DEFAULT_NO_PROXY)
+
+            target = cli_module.launchctl_gui_target()
+            enable_index = calls.index(["launchctl", "enable", f"{target}/com.kuangre.codex-switch.proxy"])
+            bootstrap_index = calls.index(["launchctl", "bootstrap", target, str(launch_agent)])
+            self.assertLess(enable_index, bootstrap_index)
+
     def _proxy_toggle_patches(self, home, launch_agent, calls):
         def fake_run(cmd, **kwargs):
             calls.append(list(cmd))
