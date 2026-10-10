@@ -114,6 +114,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var localModelDisplayName = ""
     @Published var useChatAdapter = true
     @Published var skipLogin = false
+    @Published var reasoningEffort = "xhigh"
     @Published var replacementAPIKey = ""
     @Published var officialModel = ""
     @Published var output = ""
@@ -162,6 +163,7 @@ final class SwitchViewModel: ObservableObject {
                 self.localModelDisplayName = values["local_model_display_name"] ?? self.localModel
                 self.useChatAdapter = (values["chat_adapter"] ?? "true") != "false"
                 self.skipLogin = (values["skip_login"] ?? "false") == "true"
+                self.reasoningEffort = values["local_reasoning_effort"] ?? "xhigh"
                 self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
                 if let proxy {
                     self.updateProxyState(from: proxy.output)
@@ -241,6 +243,7 @@ final class SwitchViewModel: ObservableObject {
         let displayName = localModelDisplayName
         let useAdapter = useChatAdapter
         let doSkipLogin = skipLogin
+        let effort = reasoningEffort
         let replacementKey = replacementAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let official = officialModel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -254,6 +257,7 @@ final class SwitchViewModel: ObservableObject {
                     mode: mode,
                     useChatAdapter: useAdapter,
                     skipLogin: doSkipLogin,
+                    reasoningEffort: effort,
                     replacementKey: replacementKey
                 )
                 return
@@ -297,7 +301,7 @@ final class SwitchViewModel: ObservableObject {
         }
     }
 
-    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, mode: ProviderMode, useChatAdapter: Bool, skipLogin: Bool, replacementKey: String) {
+    private func configureCodex(baseURL: String, customModel: String, displayName: String, officialModel: String, mode: ProviderMode, useChatAdapter: Bool, skipLogin: Bool, reasoningEffort: String, replacementKey: String) {
         let defaultProvider = mode == .custom ? "custom" : "openai"
         var arguments = [
             "configure",
@@ -306,6 +310,7 @@ final class SwitchViewModel: ObservableObject {
             "--custom-model-name", displayName,
             "--official-model", officialModel,
             "--default-provider", defaultProvider,
+            "--reasoning-effort", reasoningEffort,
             "--restart-codex",
         ]
         if useChatAdapter {
@@ -753,6 +758,15 @@ struct ContentView: View {
                             settingRow(texts.text("Chat 适配器", "Chat Adapter")) {
                                 Toggle(texts.text("把 Chat Completions 转成 Responses", "Bridge Chat Completions to Responses"), isOn: $model.useChatAdapter)
                                     .toggleStyle(.checkbox)
+                            }
+                            settingRow(texts.text("推理强度", "Reasoning Effort")) {
+                                Picker("", selection: $model.reasoningEffort) {
+                                    ForEach(["low", "medium", "high", "xhigh"], id: \.self) { effort in
+                                        Text(effort).tag(effort)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .labelsHidden()
                             }
                             settingRow(texts.text("跳过登录", "Skip Login")) {
                                 Toggle(texts.text("绕过 ChatGPT OAuth 登录验证", "Bypass ChatGPT OAuth login"), isOn: $model.skipLogin)

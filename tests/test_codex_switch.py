@@ -1322,6 +1322,7 @@ class CodexSwitchTests(unittest.TestCase):
                     "adapter_upstream_base_url": "https://relay.example",
                     "local_api_key": "sk-x",
                     "local_upstream_model": "glm-5.2",
+                    "chat_adapter": "true",
                 }),
                 encoding="utf-8",
             )
@@ -1341,6 +1342,139 @@ class CodexSwitchTests(unittest.TestCase):
             self.assertIn("/responses", stream)
             self.assertIn("/chat/completions", stream)
             self.assertIn("no such route", stream)
+
+    def _proxy_handler_with_state(self, temp: str, **extra_state: str) -> "cli_module.AdapterHandler":
+        home = Path(temp) / ".codex"
+        home.mkdir(parents=True)
+        state = {
+            "adapter_upstream_base_url": "https://relay.example",
+            "local_api_key": "sk-x",
+            "local_upstream_model": "gpt-6.1-sol",
+        }
+        state.update(extra_state)
+        (home / "codex-switch-state.json").write_text(json.dumps(state), encoding="utf-8")
+        (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-x"}), encoding="utf-8")
+        handler = self._make_adapter_handler()
+        handler.server = SimpleNamespace(home=home)
+        return handler
+
+    def test_passthrough_only_stream_failure_never_bridges_to_chat(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+        requested_urls: list[str] = []
+
+        def fake_urlopen(req, timeout=None):
+            requested_urls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b"context too long"))
+
+        request = {"stream": True, "input": [], "store": False, "reasoning": {"effort": "xhigh"}}
+        with tempfile.TemporaryDirectory() as temp:
+            handler = self._proxy_handler_with_state(temp, chat_adapter="false")
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                handler.proxy_response(request)
+
+        stream = handler.wfile.getvalue().decode("utf-8")
+        self.assertIn("response.failed", stream)
+        self.assertIn("context too long", stream)
+        # Every sanitize tier was tried, all against /responses — never the chat bridge.
+        self.assertEqual(len(requested_urls), 3)
+        self.assertTrue(all(url.endswith("/v1/responses") for url in requested_urls), requested_urls)
+        # A request-specific rejection must not poison later requests on this route.
+        self.assertEqual(cli_module._RESPONSES_UNSUPPORTED_ROUTES, set())
+
+    def test_passthrough_only_keeps_trying_responses_after_a_rejection(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+        sse_body = b"event: response.completed\ndata: {}\n\ndata: [DONE]\n\n"
+        requested_urls: list[str] = []
+
+        def fake_urlopen(req, timeout=None):
+            requested_urls.append(req.full_url)
+            if len(requested_urls) == 1:
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b"route flapped"))
+            return self._FakeUpstreamResponse(sse_body, "text/event-stream")
+
+        with tempfile.TemporaryDirectory() as temp:
+            first = self._proxy_handler_with_state(temp, chat_adapter="false")
+            second = self._make_adapter_handler()
+            second.server = first.server
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                first.proxy_response({"stream": True, "input": []})
+                second.proxy_response({"stream": True, "input": []})
+
+        self.assertIn("response.failed", first.wfile.getvalue().decode("utf-8"))
+        self.assertIn(sse_body.decode("utf-8"), second.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(len(requested_urls), 2)
+        self.assertTrue(all(url.endswith("/v1/responses") for url in requested_urls), requested_urls)
+
+    def test_passthrough_only_non_stream_failure_returns_502_without_chat(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+        requested_urls: list[str] = []
+
+        def fake_urlopen(req, timeout=None):
+            requested_urls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, io.BytesIO(b"relay busy"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            handler = self._proxy_handler_with_state(temp, chat_adapter="false")
+            statuses: list[int] = []
+            handler.send_response = statuses.append
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                handler.proxy_response({"stream": False, "input": []})
+
+        self.assertEqual(statuses, [502])
+        body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertIn("relay busy", body["error"]["message"])
+        self.assertTrue(all(url.endswith("/v1/responses") for url in requested_urls), requested_urls)
+
+    def test_parallel_config_writes_reasoning_effort_for_custom_default(self) -> None:
+        config = cli_module.rewrite_config_for_parallel(
+            'model = "gpt-5.5"\n', cli_module.DEFAULT_ADAPTER_BASE_URL, "gpt-5.5",
+            "codex-switch/gpt-6.1-sol", "sk-x", None, "custom", False, "xhigh",
+        )
+        sections = {name: "".join(lines) for name, lines in cli_module.split_toml_sections(config)}
+        self.assertIn('model_reasoning_effort = "xhigh"', sections[""])
+        self.assertIn('model_reasoning_effort = "xhigh"', sections["[profiles.ccswitch]"])
+
+    def test_parallel_config_official_default_keeps_top_level_reasoning_effort(self) -> None:
+        config = cli_module.rewrite_config_for_parallel(
+            'model = "gpt-5.5"\nmodel_reasoning_effort = "high"\n', cli_module.DEFAULT_ADAPTER_BASE_URL,
+            "gpt-5.5", "codex-switch/gpt-6.1-sol", "sk-x", None, "openai", False, "xhigh",
+        )
+        sections = {name: "".join(lines) for name, lines in cli_module.split_toml_sections(config)}
+        self.assertIn('model_reasoning_effort = "high"', sections[""])
+        self.assertNotIn("xhigh", sections[""])
+        self.assertIn('model_reasoning_effort = "xhigh"', sections["[profiles.ccswitch]"])
+
+    def test_local_config_writes_reasoning_effort(self) -> None:
+        config = cli_module.rewrite_config_for_local(
+            'model = "gpt-5.5"\n', cli_module.DEFAULT_ADAPTER_BASE_URL, "codex-switch/gpt-6.1-sol", "sk-x", None, "xhigh",
+        )
+        sections = {name: "".join(lines) for name, lines in cli_module.split_toml_sections(config)}
+        self.assertIn('model_reasoning_effort = "xhigh"', sections[""])
+
+    def test_configure_saves_reasoning_effort_defaulting_to_xhigh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_sample_config(home)
+            (home / "auth.json").write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test"}), encoding="utf-8")
+            base_args = ["configure", "--base-url", "https://relay.example", "--custom-model", "gpt-6.1-sol", "--default-provider", "custom"]
+            parser = cli_module.build_parser()
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}), \
+                    mock.patch.object(cli_module, "start_adapter_launch_agent", return_value=home / "adapter.plist"), \
+                    mock.patch.object(cli_module, "apply_proxy_for_provider"), \
+                    mock.patch.object(cli_module, "repair_legacy_message_ids_and_report"), \
+                    redirect_stdout(io.StringIO()):
+                args = parser.parse_args(base_args)
+                self.assertEqual(args.func(args), 0)
+                default_state = read_state(home)
+                default_top = dict(cli_module.split_toml_sections((home / "config.toml").read_text(encoding="utf-8")))[""]
+                args = parser.parse_args(base_args + ["--reasoning-effort", "high"])
+                self.assertEqual(args.func(args), 0)
+
+            self.assertEqual(default_state["local_reasoning_effort"], "xhigh")
+            self.assertIn('model_reasoning_effort = "xhigh"\n', "".join(default_top))
+            self.assertEqual(read_state(home)["local_reasoning_effort"], "high")
+            top = dict(cli_module.split_toml_sections((home / "config.toml").read_text(encoding="utf-8")))[""]
+            self.assertIn('model_reasoning_effort = "high"\n', "".join(top))
 
     def test_configure_codex_maps_duplicate_upstream_model_to_safe_custom_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

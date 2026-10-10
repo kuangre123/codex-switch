@@ -52,6 +52,8 @@ MESSAGE_ID_REPAIR_STATE_KEY = "message_id_repair_version"
 DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+DEFAULT_REASONING_EFFORT = "xhigh"
 
 
 class SwitchError(RuntimeError):
@@ -639,7 +641,14 @@ def apply_proxy_for_provider(home: Path, provider: str, state: dict[str, object]
         print("Disabled the HTTP proxy for custom API mode (it only applies to official mode).")
 
 
-def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: str, catalog_path: Path | None) -> str:
+def rewrite_config_for_local(
+    content: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    catalog_path: Path | None,
+    reasoning_effort: str | None = None,
+) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
     for section, lines in sections:
@@ -649,6 +658,8 @@ def rewrite_config_for_local(content: str, base_url: str, model: str, api_key: s
             # Custom always authenticates as api-key: the new Codex rejects
             # custom models on a ChatGPT account.
             lines = set_key(lines, "preferred_auth_method", "api-key")
+            if reasoning_effort:
+                lines = set_key(lines, "model_reasoning_effort", reasoning_effort)
             if catalog_path is not None:
                 lines = set_key(lines, "model_catalog_json", str(catalog_path))
             else:
@@ -682,6 +693,7 @@ def rewrite_config_for_parallel(
     catalog_path: Path | None,
     default_provider: str = "openai",
     skip_login: bool = False,
+    reasoning_effort: str | None = None,
 ) -> str:
     sections = split_toml_sections(content)
     rewritten: list[tuple[str, list[str]]] = []
@@ -700,6 +712,10 @@ def rewrite_config_for_parallel(
             lines = set_key(lines, "model_provider", selected_provider)
             lines = set_key(lines, "model", selected_model)
             lines = set_key(lines, "preferred_auth_method", auth_method)
+            # The effort setting belongs to the custom route; an official
+            # default keeps whatever effort the user chose for it.
+            if reasoning_effort and default_provider == CUSTOM_PROVIDER_ID:
+                lines = set_key(lines, "model_reasoning_effort", reasoning_effort)
             if catalog_path is not None:
                 lines = set_key(lines, "model_catalog_json", str(catalog_path))
             else:
@@ -708,9 +724,10 @@ def rewrite_config_for_parallel(
     rewritten = ensure_custom_provider(rewritten, base_url, api_key, [custom_model])
     # CLI parity: `codex --profile ccswitch` -> custom route,
     # `codex --profile official` -> official route.
-    rewritten = ensure_profile(
-        rewritten, "ccswitch", {"model_provider": CUSTOM_PROVIDER_ID, "model": custom_model}
-    )
+    ccswitch_profile = {"model_provider": CUSTOM_PROVIDER_ID, "model": custom_model}
+    if reasoning_effort:
+        ccswitch_profile["model_reasoning_effort"] = reasoning_effort
+    rewritten = ensure_profile(rewritten, "ccswitch", ccswitch_profile)
     rewritten = ensure_profile(
         rewritten, "official", {"model_provider": "openai", "model": official_model}
     )
@@ -851,6 +868,11 @@ def custom_slug_for_upstream(home: Path, upstream_model: str, official_model: st
 
 def upstream_model_for_state(state: dict[str, object], fallback: str) -> str:
     return effective_setting(state, "local_upstream_model", effective_setting(state, "adapter_upstream_model", fallback))
+
+
+def reasoning_effort_for_state(state: dict[str, object]) -> str:
+    effort = effective_setting(state, "local_reasoning_effort", DEFAULT_REASONING_EFFORT)
+    return effort if effort in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
 def historical_model_slugs(home: Path) -> list[str]:
@@ -1593,14 +1615,22 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         api_key = effective_setting(state, "local_api_key", str(auth.get("OPENAI_API_KEY") or ""))
         if not api_key:
             raise SwitchError("adapter API key is missing")
+        # "Chat 适配器" toggle. Off (the default) is pure Responses passthrough:
+        # Codex 0.162+ sends its tools inside an `additional_tools` input item
+        # the chat bridge can't carry, so a bridged reply would arrive with no
+        # tools at all. Returning the upstream error lets Codex retry or show it.
+        chat_bridge = effective_setting(state, "chat_adapter", "false") == "true"
         stream = bool(request.get("stream"))
         resp_id = f"resp_{uuid.uuid4().hex}"
 
         if stream:
             errors: list[str] = []
-            if self.relay_responses_stream(request, upstream_base_url, upstream_model, api_key, errors):
+            if self.relay_responses_stream(
+                request, upstream_base_url, upstream_model, api_key, errors,
+                remember_unsupported=chat_bridge,
+            ):
                 return
-            if self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id, errors):
+            if chat_bridge and self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id, errors):
                 return
             message = "upstream did not return a usable response"
             if errors:
@@ -1623,9 +1653,18 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             return
 
         errors = []
-        passthrough = self.passthrough_responses(request, upstream_base_url, upstream_model, api_key, resp_id, errors)
+        passthrough = self.passthrough_responses(
+            request, upstream_base_url, upstream_model, api_key, resp_id, errors,
+            remember_unsupported=chat_bridge,
+        )
         if passthrough is not None:
             self.send_json(200, passthrough)
+            return
+        if not chat_bridge:
+            message = "upstream did not return a usable response"
+            if errors:
+                message += ": " + " ; ".join(errors)
+            self.send_json(502, {"error": {"message": message}})
             return
         payload = responses_request_to_chat_payload(request, upstream_model, False)
         upstream_request = urllib.request.Request(
@@ -1657,9 +1696,10 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         upstream_base_url: str, upstream_model: str,
         api_key: str, resp_id: str,
         errors: list[str] | None = None,
+        remember_unsupported: bool = True,
     ) -> dict[str, object] | None:
         route = (upstream_base_url, upstream_model)
-        if route in _RESPONSES_UNSUPPORTED_ROUTES:
+        if remember_unsupported and route in _RESPONSES_UNSUPPORTED_ROUTES:
             _append_error(errors, "/responses → skipped (upstream rejected it earlier)")
             return None
         for payload in responses_passthrough_payloads(request, upstream_model, False):
@@ -1679,7 +1719,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             except urllib.error.HTTPError as exc:
                 _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
                 if exc.code in {404, 405}:
-                    _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+                    if remember_unsupported:
+                        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
                     return None
                 if exc.code in _SANITIZE_RETRY_CODES:
                     continue
@@ -1701,7 +1742,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                     "total_tokens": raw_usage.get("total_tokens") or 0,
                 }
             return result
-        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+        if remember_unsupported:
+            _RESPONSES_UNSUPPORTED_ROUTES.add(route)
         return None
 
     def relay_chat_stream(
@@ -1991,6 +2033,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         self, request: dict[str, object],
         upstream_base_url: str, upstream_model: str, api_key: str,
         errors: list[str] | None = None,
+        remember_unsupported: bool = True,
     ) -> bool:
         """Relay the upstream's native /v1/responses SSE stream straight to Codex.
 
@@ -2002,9 +2045,13 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
         being discarded. Returns True if the response was handled; on False
         the caller falls back to the chat-completions bridge, with the reason
         for each failed attempt appended to `errors`.
+
+        ``remember_unsupported`` lets a rejected route go straight to the chat
+        bridge on later requests; pure passthrough turns it off because there
+        is no bridge to skip to.
         """
         route = (upstream_base_url, upstream_model)
-        if route in _RESPONSES_UNSUPPORTED_ROUTES:
+        if remember_unsupported and route in _RESPONSES_UNSUPPORTED_ROUTES:
             _append_error(errors, "/responses → skipped (upstream rejected it earlier)")
             return False
         for payload in responses_passthrough_payloads(request, upstream_model, True):
@@ -2024,7 +2071,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             except urllib.error.HTTPError as exc:
                 _append_error(errors, f"/responses → HTTP {exc.code} {_http_error_detail(exc)}".strip())
                 if exc.code in {404, 405}:
-                    _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+                    if remember_unsupported:
+                        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
                     return False
                 if exc.code in _SANITIZE_RETRY_CODES:
                     continue
@@ -2038,7 +2086,8 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             return self._relay_sse_body(response, upstream_model)
         # Even the most sanitized payload was rejected: the endpoint/model
         # combination doesn't do Responses, so stop asking.
-        _RESPONSES_UNSUPPORTED_ROUTES.add(route)
+        if remember_unsupported:
+            _RESPONSES_UNSUPPORTED_ROUTES.add(route)
         return False
 
     def synthesize_stream_from_responses_json(
@@ -2640,7 +2689,9 @@ def switch_local(args: argparse.Namespace) -> int:
     # separately and leaves their content/metadata intact.
     if catalog_path.exists():
         catalog_path.unlink()
-    config = rewrite_config_for_local(read_config(config_path), base_url, model, api_key, None)
+    config = rewrite_config_for_local(
+        read_config(config_path), base_url, model, api_key, None, reasoning_effort_for_state(state)
+    )
     atomic_write(config_path, config, 0o600)
     apply_proxy_for_provider(home, "custom", state)
     if not getattr(args, "restart_codex", False):
@@ -2715,6 +2766,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     default_provider = args.default_provider or effective_setting(state, "default_provider", "openai")
     if default_provider not in {"openai", CUSTOM_PROVIDER_ID}:
         raise SwitchError("default_provider must be openai or custom")
+    reasoning_effort = getattr(args, "reasoning_effort", None) or reasoning_effort_for_state(state)
     custom_model = args.custom_model_slug or custom_slug_for_upstream(home, requested_model, official_model)
     ensure_distinct_custom_model(home, custom_model, official_model)
     if not display_name:
@@ -2769,6 +2821,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     provider_base_url = DEFAULT_ADAPTER_BASE_URL
     skip_login = getattr(args, "skip_login", False)
     state["skip_login"] = "true" if skip_login else "false"
+    state["local_reasoning_effort"] = reasoning_effort
     # A custom default must authenticate as api-key regardless of the toggle:
     # the new Codex rejects custom models on a ChatGPT account. Official default
     # keeps the ChatGPT login unless the user explicitly bypasses it.
@@ -2808,6 +2861,7 @@ def configure_codex(args: argparse.Namespace) -> int:
         None,
         default_provider,
         skip_login,
+        reasoning_effort,
     )
     atomic_write(config_path, config, 0o600)
     apply_proxy_for_provider(home, default_provider, state)
@@ -2824,6 +2878,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     print(f"custom_model: {custom_model}")
     print(f"upstream_model: {requested_model}")
     print(f"custom_model_name: {display_name}")
+    print(f"reasoning_effort: {reasoning_effort}")
     print("model_catalog_json: (built-in)")
     print(f"api_key: {redacted_key(api_key)}")
     print(f"backup_dir: {backup_dir}")
@@ -2885,6 +2940,7 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
     print(f"default_provider: {effective_setting(state, 'default_provider', 'openai')}")
     print(f"chat_adapter: {effective_setting(state, 'chat_adapter', 'false')}")
+    print(f"local_reasoning_effort: {reasoning_effort_for_state(state)}")
     print(f"skip_login: {effective_setting(state, 'skip_login', 'false')}")
     print(f"adapter_upstream_base_url: {effective_setting(state, 'adapter_upstream_base_url', effective_setting(state, 'local_base_url', DEFAULT_BASE_URL))}")
     return 0
@@ -3209,6 +3265,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--official-model", help=f"Official Codex default model. Default: saved setting or {DEFAULT_OFFICIAL_MODEL}")
     configure.add_argument("--default-provider", choices=("openai", CUSTOM_PROVIDER_ID), help="Default Codex provider after saving. Defaults to saved setting or openai.")
     configure.add_argument("--chat-adapter", action="store_true", help="Route Codex Responses API traffic through the local chat-completions adapter.")
+    configure.add_argument("--reasoning-effort", choices=REASONING_EFFORTS, help=f"Default reasoning effort for the custom route. Default: saved setting or {DEFAULT_REASONING_EFFORT}")
     configure.add_argument("--probe", action="store_true", help="Before saving, verify the custom API responds (Responses or Chat Completions); abort with an error if neither works.")
     configure.add_argument("--skip-login", action="store_true", help="Bypass ChatGPT OAuth login by using API-key auth mode.")
     configure.add_argument("--restart-codex", action="store_true", help="Gracefully quit and reopen Codex.app after saving.")
