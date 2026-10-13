@@ -1262,6 +1262,25 @@ def _append_error(errors: list[str] | None, message: str) -> None:
         errors.append(message[:300])
 
 
+def upstream_failure_message(errors: list[str]) -> str:
+    """The error Codex shows when no upstream route produced a response.
+
+    A relay's content-moderation block is explained first, in Chinese: Codex
+    truncates long errors, and the raw rejection reads like a transient
+    failure that retrying would fix, when every retry of the same
+    conversation is rejected again.
+    """
+    message = "upstream did not return a usable response"
+    if errors:
+        message += ": " + " ; ".join(errors)
+    joined = " ".join(errors)
+    if "content_policy_violation" in joined:
+        reference = re.search(r"\brly_[0-9A-Za-z]+", joined)
+        contact = f"把编号 {reference.group(0)} 发给中转站客服" if reference else "把下面的报错发给中转站客服"
+        message = f"中转站内容审核拦截了这个会话：请新开会话，或{contact}。 {message}"
+    return message
+
+
 def _is_reasoning_item(value: object) -> bool:
     return isinstance(value, dict) and value.get("type") == "reasoning"
 
@@ -1632,9 +1651,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
                 return
             if chat_bridge and self.relay_chat_stream(request, upstream_base_url, upstream_model, api_key, resp_id, errors):
                 return
-            message = "upstream did not return a usable response"
-            if errors:
-                message += ": " + " ; ".join(errors)
+            message = upstream_failure_message(errors)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1661,10 +1678,7 @@ class AdapterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, passthrough)
             return
         if not chat_bridge:
-            message = "upstream did not return a usable response"
-            if errors:
-                message += ": " + " ; ".join(errors)
-            self.send_json(502, {"error": {"message": message}})
+            self.send_json(502, {"error": {"message": upstream_failure_message(errors)}})
             return
         payload = responses_request_to_chat_payload(request, upstream_model, False)
         upstream_request = urllib.request.Request(

@@ -1425,6 +1425,48 @@ class CodexSwitchTests(unittest.TestCase):
         self.assertIn("relay busy", body["error"]["message"])
         self.assertTrue(all(url.endswith("/v1/responses") for url in requested_urls), requested_urls)
 
+    _CONTENT_POLICY_BODY = (
+        b'{"error":{"code":"content_policy_violation","message":"Request rejected by content policy. '
+        b'If you believe this is an error, contact support with reference rly_565b3b7b78d02e1ec6982f0e"}}'
+    )
+
+    def test_content_policy_rejection_is_explained_first_in_stream_failure(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(self._CONTENT_POLICY_BODY))
+
+        with tempfile.TemporaryDirectory() as temp:
+            handler = self._proxy_handler_with_state(temp, chat_adapter="false")
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                handler.proxy_response({"stream": True, "input": []})
+
+        failed = [
+            json.loads(line[len("data: "):])
+            for line in handler.wfile.getvalue().decode("utf-8").splitlines()
+            if line.startswith("data: {")
+        ]
+        message = failed[0]["response"]["error"]["message"]
+        # Codex truncates long errors, so the explanation must come first.
+        self.assertTrue(message.startswith("中转站内容审核拦截"), message)
+        self.assertIn("rly_565b3b7b78d02e1ec6982f0e", message)
+        self.assertIn("/responses → HTTP 403", message)
+
+    def test_content_policy_rejection_is_explained_in_non_stream_failure(self) -> None:
+        cli_module._RESPONSES_UNSUPPORTED_ROUTES.clear()
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(self._CONTENT_POLICY_BODY))
+
+        with tempfile.TemporaryDirectory() as temp:
+            handler = self._proxy_handler_with_state(temp, chat_adapter="false")
+            with mock.patch.object(cli_module.urllib.request, "urlopen", side_effect=fake_urlopen):
+                handler.proxy_response({"stream": False, "input": []})
+
+        message = json.loads(handler.wfile.getvalue().decode("utf-8"))["error"]["message"]
+        self.assertTrue(message.startswith("中转站内容审核拦截"), message)
+        self.assertIn("rly_565b3b7b78d02e1ec6982f0e", message)
+
     def test_parallel_config_writes_reasoning_effort_for_custom_default(self) -> None:
         config = cli_module.rewrite_config_for_parallel(
             'model = "gpt-5.5"\n', cli_module.DEFAULT_ADAPTER_BASE_URL, "gpt-5.5",
