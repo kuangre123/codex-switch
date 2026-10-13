@@ -666,8 +666,8 @@ struct ContentView: View {
                             Label(texts.text("自定义 / 第三方供应商", "Custom / Third-party Provider"), systemImage: "shippingbox")
                                 .font(.headline)
                             Text(texts.text(
-                                "支持任意 OpenAI 兼容的第三方 / 中转 API：填入它的接入点、模型 ID 和 API Key 即可。接入点不要以 / 结尾；多数中转为 Chat Completions，保持下方「Chat 适配器」开启。",
-                                "Works with any OpenAI-compatible third-party / relay API: enter its endpoint, model ID and API key. Don't end the endpoint with a slash; most relays are Chat Completions, so keep the adapter on."
+                                "支持任意 OpenAI 兼容的第三方 / 中转 API：填入它的接入点、模型 ID 和 API Key 即可。接入点不要以 / 结尾。中转支持 Responses 接口时保持下方「Chat 适配器」关闭（Codex 才能执行命令、改文件）；只支持 Chat Completions 时再开启，此时 Codex 只能对话。",
+                                "Works with any OpenAI-compatible third-party / relay API: enter its endpoint, model ID and API key. Don't end the endpoint with a slash. Keep the Chat Adapter off when the relay supports the Responses API (so Codex can run commands and edit files); turn it on only for Chat Completions-only relays, where Codex can just chat."
                             ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -694,7 +694,9 @@ struct ContentView: View {
                                         model.localBaseURL = ""
                                         model.localModel = "gpt-5.5"
                                         model.localModelDisplayName = "gpt-5.5"
-                                        model.useChatAdapter = true
+                                        // Relays that serve Codex speak Responses; the chat
+                                        // bridge would drop Codex's tools.
+                                        model.useChatAdapter = false
                                     }
                                 } label: {
                                     Label(texts.text("选择常用国内模型 / 第三方…", "Pick a preset or third-party…"), systemImage: "wand.and.stars")
