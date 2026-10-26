@@ -240,6 +240,82 @@ class UpstreamModelsTests(unittest.TestCase):
 
 
 class CodexSwitchTests(unittest.TestCase):
+    def test_official_switch_replaces_retired_model_from_current_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)
+            (home / "auth.json").write_text(json.dumps({"auth_mode": "api-key"}), encoding="utf-8")
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({"official_model": "gpt-5.5"}), encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "gpt-reserve", "visibility": "hide", "priority": 0},
+                {"slug": "gpt-6-astra", "visibility": "list", "priority": 2},
+                {"slug": "gpt-6.1-sol", "visibility": "list", "priority": 1},
+            ]}), encoding="utf-8")
+
+            result = run_tool(home, "official")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(cli_module.configured_model((home / "config.toml").read_text()), "gpt-6.1-sol")
+            self.assertEqual(read_state(home)["official_model"], "gpt-6.1-sol")
+            self.assertIn("official_model_warn", result.stdout)
+
+            selected = run_tool(home, "official", "--model", "gpt-6-astra")
+            self.assertEqual(selected.returncode, 0, selected.stderr)
+            self.assertEqual(cli_module.configured_model((home / "config.toml").read_text()), "gpt-6-astra")
+            self.assertEqual(read_state(home)["official_model"], "gpt-6-astra")
+
+    def test_config_show_offers_current_official_models_and_resolves_saved_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            (home / "codex-switch-state.json").write_text(
+                json.dumps({"official_model": "codex-switch/gpt-6.1-sol"}), encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "gpt-reserve", "visibility": "hide", "priority": 0},
+                {"slug": "gpt-6-astra", "visibility": "list", "priority": 2},
+                {"slug": "gpt-6.1-sol", "visibility": "list", "priority": 1},
+                {"slug": "codex-switch/custom", "visibility": "list", "priority": 0},
+            ]}), encoding="utf-8")
+
+            result = run_tool(home, "config", "show")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split(": ", 1) for line in result.stdout.splitlines())
+            self.assertEqual(values["official_model"], "gpt-6.1-sol")
+            self.assertEqual(json.loads(values["official_model_options"]), ["gpt-6.1-sol", "gpt-6-astra"])
+
+    def test_configure_resolves_stale_official_model_before_restarting_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            write_local_config(home)
+            write_thread_database(home)
+            (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-test"}), encoding="utf-8")
+            (home / "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "gpt-6.1-sol", "visibility": "list", "priority": 1},
+            ]}), encoding="utf-8")
+            args = cli_module.build_parser().parse_args([
+                "configure", "--custom-model", "vendor-model", "--official-model", "gpt-5.5",
+                "--default-provider", "openai", "--restart-codex",
+            ])
+
+            def fake_run(command, **kwargs):
+                return SimpleNamespace(returncode=1 if command[0] == "pgrep" else 0, stdout="", stderr="")
+
+            with mock.patch.object(cli_module, "codex_home", return_value=home), \
+                    mock.patch.object(cli_module, "start_adapter_launch_agent", return_value=home / "adapter.plist"), \
+                    mock.patch.object(cli_module.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(cli_module.time, "sleep"), redirect_stdout(io.StringIO()):
+                cli_module.configure_codex(args)
+
+            self.assertEqual(cli_module.configured_model((home / "config.toml").read_text()), "gpt-6.1-sol")
+            self.assertEqual(read_state(home)["official_model"], "gpt-6.1-sol")
+            with closing(sqlite3.connect(home / "sqlite" / "state_5.sqlite")) as connection:
+                pairs = set(connection.execute("SELECT model_provider, model FROM threads"))
+            self.assertEqual(pairs, {("openai", "gpt-6.1-sol")})
+
     def test_local_switch_preserves_unrelated_config_and_stores_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -303,7 +379,7 @@ class CodexSwitchTests(unittest.TestCase):
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_provider = "openai"', config)
-            self.assertIn('model = "gpt-5.5"', config)
+            self.assertEqual(cli_module.configured_model(config), cli_module.DEFAULT_OFFICIAL_MODEL)
             self.assertIn('preferred_auth_method = "chatgpt"', config)
             self.assertIn('base_url = "http://127.0.0.1:9999/v1"', config)
             self.assertNotIn("model_catalog_json", config)

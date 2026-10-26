@@ -117,6 +117,7 @@ final class SwitchViewModel: ObservableObject {
     @Published var reasoningEffort = "xhigh"
     @Published var replacementAPIKey = ""
     @Published var officialModel = ""
+    @Published var officialCodexModels: [String] = []
     @Published var output = ""
     @Published var isBusy = false
     @Published var fetchedModels: [String] = []
@@ -164,7 +165,13 @@ final class SwitchViewModel: ObservableObject {
                 self.useChatAdapter = (values["chat_adapter"] ?? "true") != "false"
                 self.skipLogin = (values["skip_login"] ?? "false") == "true"
                 self.reasoningEffort = values["local_reasoning_effort"] ?? "xhigh"
-                self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-5.5")
+                self.officialModel = values["official_model"] ?? (target == .claude ? "claude-sonnet-4-6" : "gpt-6.1-sol")
+                if let data = values["official_model_options"]?.data(using: .utf8),
+                   let options = try? JSONDecoder().decode([String].self, from: data) {
+                    self.officialCodexModels = options
+                } else {
+                    self.officialCodexModels = []
+                }
                 if let proxy {
                     self.updateProxyState(from: proxy.output)
                 } else {
@@ -516,7 +523,7 @@ struct ContentView: View {
     private var officialModelOptions: [String] {
         targetTool == .claude
             ? ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]
-            : ["gpt-5.1-codex-max", "gpt-5.1-codex", "gpt-5.1", "gpt-5.5"]
+            : (model.officialCodexModels.isEmpty ? [model.officialModel] : model.officialCodexModels)
     }
 
     var body: some View {
@@ -783,7 +790,7 @@ struct ContentView: View {
                     if targetMode == .official {
                         settingRow(texts.text("官方模型", "Official Model")) {
                             HStack(spacing: 8) {
-                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-5.5", text: $model.officialModel)
+                                TextField(targetTool == .claude ? "claude-sonnet-4-6" : "gpt-6.1-sol", text: $model.officialModel)
                                     .disableAutocorrection(true)
                                 Menu {
                                     ForEach(officialModelOptions, id: \.self) { option in

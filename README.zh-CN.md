@@ -41,6 +41,7 @@ Codex Switch 把原本要手改 `~/.codex/auth.json` 和 `~/.codex/config.toml` 
 
 - 自定义 API → 顶层 `model_provider = "custom"`。
 - 官方 OpenAI → 顶层 `model_provider = "openai"`，用 Codex 内置完整模型目录。
+- 官方模型下拉列表读取本机 Codex 的 `models_cache.json`；已保存的模型不在当前可见目录时，保存会自动改用目录中优先级最高的官方模型，并同步配置与任务恢复模型。
 - 两个 provider 段 + CLI profiles 始终保留；**不写自定义模型目录**（会替换内置目录、易导致对话列表加载失败，已移除）。
 
 > 桌面端模型选择器由 Codex 自己驱动；自定义模型显示为"自定义"标签是 Codex 的限制，但请求会正确路由，CLI 可完全控制模型 ID。

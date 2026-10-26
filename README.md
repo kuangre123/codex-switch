@@ -42,6 +42,7 @@ Download `Codex-Switch-vX.Y.Z.dmg` from the [GitHub Releases](https://github.com
 
 - 选「自定义 API」→ 顶层 `model_provider = "custom"`，Codex 走你的自定义 provider。
 - 选「官方 OpenAI」→ 顶层 `model_provider = "openai"`，Codex 走官方，用其内置模型目录（官方模型列表完整）。
+- 官方模型下拉列表读取本机 Codex 的 `models_cache.json`；已保存的模型不在当前可见目录时，保存会自动改用目录中优先级最高的官方模型，并同步配置与任务恢复模型。
 - 两个 provider 段和 CLI profiles 始终保留；切换只改顶层默认 + auth。
 - **不写自定义模型目录（model_catalog_json）** —— 早期版本写过，但它会替换 Codex 内置目录、还容易让对话列表加载失败，已彻底移除。
 

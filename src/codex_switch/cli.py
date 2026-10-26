@@ -30,7 +30,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 DEFAULT_BASE_URL = "https://jp.icodeeasy.cc"
 DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_OFFICIAL_MODEL = "gpt-5.5"
+DEFAULT_OFFICIAL_MODEL = "gpt-6.1-sol"
 CUSTOM_MODEL_SLUG_PREFIX = "codex-switch/"
 DEFAULT_CUSTOM_MODEL = f"{CUSTOM_MODEL_SLUG_PREFIX}gpt-5.5"
 DEFAULT_UPSTREAM_MODEL = "gpt-5.5"
@@ -837,6 +837,32 @@ def load_official_models(home: Path) -> list[dict[str, object]]:
 
 def official_model_slugs(home: Path) -> set[str]:
     return {item["slug"] for item in load_official_models(home) if isinstance(item.get("slug"), str)}
+
+
+def official_model_options(home: Path) -> list[str]:
+    models = [
+        item for item in load_official_models(home)
+        if isinstance(item.get("slug"), str) and item["slug"].strip()
+        and not item["slug"].startswith(CUSTOM_MODEL_SLUG_PREFIX)
+        and item.get("visibility", "list") == "list"
+    ]
+    models.sort(key=lambda item: (
+        item["priority"] if isinstance(item.get("priority"), (int, float)) else float("inf")
+    ))
+    return list(dict.fromkeys(item["slug"] for item in models))
+
+
+def resolve_official_model(home: Path, requested: str | None = None, warn: bool = False) -> str:
+    options = official_model_options(home)
+    candidate = (requested or "").strip()
+    if candidate and (
+        candidate in options or (not options and not candidate.startswith(CUSTOM_MODEL_SLUG_PREFIX))
+    ):
+        return candidate
+    selected = options[0] if options else DEFAULT_OFFICIAL_MODEL
+    if warn and candidate and candidate != selected:
+        print(f"official_model_warn: 官方模型 {candidate} 不在当前 Codex 模型目录中，已改用 {selected}。")
+    return selected
 
 
 def ensure_distinct_custom_model(home: Path, custom_model: str, official_model: str | None = None) -> None:
@@ -2732,7 +2758,9 @@ def switch_official(args: argparse.Namespace) -> int:
     auth = load_auth(auth_path)
     state = load_state(home)
     remember_current_auth(home, auth, state)
-    model = args.model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    model = resolve_official_model(home, args.model or effective_setting(state, "official_model", ""), warn=True)
+    state["official_model"] = model
+    state["default_provider"] = "openai"
     auth["auth_mode"] = "chatgpt"
     restored_login = restore_login_tokens(auth, state)
     codex_stopped = stop_codex_before_switch(args)
@@ -2776,7 +2804,7 @@ def configure_codex(args: argparse.Namespace) -> int:
     base_url = args.base_url or effective_setting(state, "local_base_url", DEFAULT_BASE_URL)
     requested_model = args.custom_model or args.model or upstream_model_for_state(state, DEFAULT_UPSTREAM_MODEL)
     display_name = args.custom_model_name or effective_setting(state, "local_model_display_name", requested_model)
-    official_model = args.official_model or effective_setting(state, "official_model", DEFAULT_OFFICIAL_MODEL)
+    official_model = resolve_official_model(home, args.official_model or effective_setting(state, "official_model", ""), warn=True)
     default_provider = args.default_provider or effective_setting(state, "default_provider", "openai")
     if default_provider not in {"openai", CUSTOM_PROVIDER_ID}:
         raise SwitchError("default_provider must be openai or custom")
@@ -2951,7 +2979,8 @@ def config_show(_: argparse.Namespace) -> int:
     print(f"local_model: {effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL)}")
     print(f"local_upstream_model: {upstream_model_for_state(state, DEFAULT_UPSTREAM_MODEL)}")
     print(f"local_model_display_name: {effective_setting(state, 'local_model_display_name', effective_setting(state, 'local_model', DEFAULT_CUSTOM_MODEL))}")
-    print(f"official_model: {effective_setting(state, 'official_model', DEFAULT_OFFICIAL_MODEL)}")
+    print(f"official_model: {resolve_official_model(home, effective_setting(state, 'official_model', ''))}")
+    print(f"official_model_options: {json.dumps(official_model_options(home), ensure_ascii=False)}")
     print(f"default_provider: {effective_setting(state, 'default_provider', 'openai')}")
     print(f"chat_adapter: {effective_setting(state, 'chat_adapter', 'false')}")
     print(f"local_reasoning_effort: {reasoning_effort_for_state(state)}")
